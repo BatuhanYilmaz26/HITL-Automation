@@ -29,6 +29,21 @@ An AI agent processes player withdrawals. **Every withdrawal** is submitted to a
                         └──────────────────┘
 ```
 
+## Reliability Features
+
+This PoC is designed so that **zero withdrawal requests are missed or skipped**, even under high concurrency:
+
+| Feature | File | Description |
+|---------|------|-------------|
+| **LLM Semaphore** | `agent.py` | `asyncio.Semaphore` throttles concurrent LLM calls (default: 50, configurable via `LLM_CONCURRENCY_LIMIT`). Excess requests queue instead of failing. |
+| **LLM Retry** | `agent.py` | Both `start_withdrawal` and `resume_withdrawal` auto-retry on 429/RESOURCE_EXHAUSTED errors with progressive delays (15s, 30s, 60s). |
+| **Sheets Lock** | `sheets_service.py` | `threading.Lock` serializes Google Sheets writes, preventing race conditions on row assignment. |
+| **Sheets Retry** | `sheets_service.py` | Exponential backoff (up to 5 retries) for Sheets API 429/5xx errors. |
+| **Gap-tolerant Row Finder** | `sheets_service.py` | Appends after the last filled row, not the first empty gap. |
+| **Error Propagation** | `tools.py`, `main.py` | Sheet write failures and agent errors are returned to the caller (never silently swallowed). |
+| **Webhook Retry** | `apps_script.js` | Apps Script retries up to 3× with 2s/4s/8s backoff if the webhook fails, ensuring human decisions are never lost. |
+| **Correction Fallback** | `main.py` | If a webhook arrives for a session that was already finalized, the decision is applied directly via `player_id` from `row_data`. |
+
 ## Quick Start
 
 ### 1. Clone & Virtual Environment
@@ -55,12 +70,13 @@ copy .env.example .env     # Windows
 
 Edit `.env` and fill in:
 
-| Variable           | Description                                                      |
-| ------------------ | ---------------------------------------------------------------- |
-| `GOOGLE_API_KEY` | Your Gemini API key (from[AI Studio](https://aistudio.google.com/)) |
-| `SPREADSHEET_ID` | The long ID from your Google Sheet URL                           |
-| `SHEET_NAME`     | Tab name (default:`Sheet1`)                                    |
-| `SHEETS_API_KEY` | Can be the same key if Sheets API is enabled on the project      |
+| Variable               | Description                                                           |
+| ---------------------- | --------------------------------------------------------------------- |
+| `GOOGLE_API_KEY`       | Your Gemini API key (from [AI Studio](https://aistudio.google.com/))  |
+| `SPREADSHEET_ID`       | The long ID from your Google Sheet URL                                |
+| `SHEET_NAME`           | Tab name (default: `Sheet1`)                                          |
+| `SHEETS_API_KEY`       | Can be the same key if Sheets API is enabled on the project           |
+| `LLM_CONCURRENCY_LIMIT`| Max simultaneous LLM calls (default: `50` for production, `2` for free tier) |
 
 ### 4. Google Service Account Setup
 
@@ -152,6 +168,8 @@ ADA should be set up to poll this endpoint automatically (e.g., every 5-10 secon
 
 ## Testing
 
+### Single Request
+
 ```powershell
 # Submit a withdrawal via ADA endpoint
 Invoke-RestMethod -Uri "http://localhost:8000/ada/v1/request_review" `
@@ -168,6 +186,30 @@ Invoke-RestMethod -Uri "http://localhost:8000/webhook" `
   -Headers @{"Content-Type"="application/json"} `
   -Body '{"session_id":"<SESSION_ID_FROM_RESPONSE>","decision":"Yes","notes":"Verified manually"}'
 ```
+
+### Concurrency Stress Test
+
+Use `test_concurrent.py` to simulate multiple simultaneous withdrawal requests:
+
+```powershell
+# Install test dependency (if not already)
+pip install aiohttp
+
+# Default: 15 requests in staggered batches (safe for free tier)
+python test_concurrent.py
+
+# Burst mode: all at once (requires paid Gemini API / Vertex AI)
+python test_concurrent.py --mode burst --count 15
+
+# Custom batch settings
+python test_concurrent.py --count 20 --batch-size 4 --batch-delay 65
+```
+
+The test script will:
+1. Fire all requests (concurrently or in batches)
+2. Report per-request status codes and timing
+3. Poll each player's status to confirm `pending`
+4. Show total pending sessions on the server
 
 ## API Reference
 

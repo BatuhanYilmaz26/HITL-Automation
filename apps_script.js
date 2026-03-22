@@ -24,6 +24,10 @@ const COL_SESSION_ID = 1;   // Column A
 const COL_DECISION = 9;   // Column I
 const COL_NOTES = 10;  // Column J
 
+// Retry settings for webhook delivery
+const WEBHOOK_MAX_RETRIES = 3;
+const WEBHOOK_RETRY_DELAYS = [2000, 4000, 8000]; // milliseconds
+
 // ─── Triggers ───────────────────────────────────────────────────────
 
 /**
@@ -68,6 +72,9 @@ function onChange(e) {
  * Fires whenever any cell is edited by a user.
  * We act when Column I is edited (the human Decision).
  *
+ * Includes retry logic: if the webhook fails, retries up to 3 times
+ * with exponential backoff to prevent lost human decisions.
+ *
  * @param {GoogleAppsScript.Events.SheetsOnEdit} e - The edit event.
  */
 function onEdit(e) {
@@ -101,13 +108,6 @@ function onEdit(e) {
       }
     }
 
-    Logger.log(
-      "Sending webhook for row " + row +
-      " | session=" + sessionId +
-      " | decision=" + decision +
-      " | notes=" + notes
-    );
-
     // Build the JSON payload to include decision, notes, and the full row data array
     var payload = {
       session_id: String(sessionId),
@@ -128,14 +128,48 @@ function onEdit(e) {
       options.headers = { "X-Webhook-Secret": WEBHOOK_SECRET };
     }
 
-    var response = UrlFetchApp.fetch(WEBHOOK_URL, options);
-    var code = response.getResponseCode();
-    var body = response.getContentText();
+    // Retry loop for webhook delivery — ensures human decisions are never lost
+    var success = false;
+    for (var attempt = 0; attempt < WEBHOOK_MAX_RETRIES; attempt++) {
+      try {
+        var response = UrlFetchApp.fetch(WEBHOOK_URL, options);
+        var code = response.getResponseCode();
+        var body = response.getContentText();
 
-    if (code >= 200 && code < 300) {
-      Logger.log("✅ Webhook success (HTTP " + code + "): " + body);
-    } else {
-      Logger.log("❌ Webhook error (HTTP " + code + "): " + body);
+        if (code >= 200 && code < 300) {
+          Logger.log("✅ Webhook success (HTTP " + code + "): " + body);
+          success = true;
+          break;
+        } else if (code === 404) {
+          // 404 = session not found, but the fallback correction logic in the
+          // backend will handle it via player_id from row_data. Log and stop.
+          Logger.log("⚠️ Webhook 404 (session not pending): " + body);
+          success = true;
+          break;
+        } else {
+          Logger.log(
+            "⚠️ Webhook attempt " + (attempt + 1) + "/" + WEBHOOK_MAX_RETRIES +
+            " failed (HTTP " + code + "): " + body
+          );
+        }
+      } catch (fetchErr) {
+        Logger.log(
+          "⚠️ Webhook attempt " + (attempt + 1) + "/" + WEBHOOK_MAX_RETRIES +
+          " error: " + fetchErr.message
+        );
+      }
+
+      // Wait before retrying (unless this was the last attempt)
+      if (attempt < WEBHOOK_MAX_RETRIES - 1) {
+        Utilities.sleep(WEBHOOK_RETRY_DELAYS[attempt]);
+      }
+    }
+
+    if (!success) {
+      Logger.log(
+        "❌ CRITICAL: Webhook FAILED after " + WEBHOOK_MAX_RETRIES + " attempts for row " + row +
+        " (session=" + sessionId + "). Human decision may be LOST!"
+      );
     }
 
   } catch (err) {

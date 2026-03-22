@@ -194,10 +194,26 @@ async def ada_request_review(req: AdaWithdrawalRequest):
             session_id=session_id,
             player_id=req.player_id,
         )
-        return {
-            "status": "pending_human_review",
-            "session_id": session_id,
-        }
+
+        # Check if the agent actually succeeded
+        status = result.get("status", "")
+        if status == "pending_human_review":
+            return {
+                "status": "pending_human_review",
+                "session_id": result.get("session_id", session_id),
+            }
+        elif status == "completed_unexpected":
+            logger.error("Agent did not escalate to HITL for player=%s", req.player_id)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Agent failed to escalate withdrawal for {req.player_id} to human review.",
+            )
+        else:
+            logger.error("Unexpected result status '%s' for player=%s", status, req.player_id)
+            raise HTTPException(status_code=500, detail=f"Unexpected status: {status}")
+
+    except HTTPException:
+        raise  # Re-raise our own HTTPExceptions
     except Exception as exc:
         logger.exception("Error starting ADA withdrawal %s", session_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc

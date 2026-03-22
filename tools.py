@@ -54,7 +54,13 @@ def request_human_approval(
     try:
         sheets_service.append_review_row(session_id, player_id)
     except Exception as exc:
-        logger.error("Sheet write failed — returning pending anyway: %s", exc)
+        logger.error("❌ Sheet write failed for session=%s player=%s: %s", session_id, player_id, exc)
+        return {
+            "status": "error",
+            "message": f"Failed to write review row for player {player_id}: {exc}",
+            "session_id": session_id,
+            "player_id": player_id,
+        }
 
     return {
         "status": "pending",
