@@ -1,0 +1,21 @@
+# Virtual Environments
+venv/
+env/
+ENV/
+
+# Environment Variables / Credentials
+.env
+service_account.json
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# OS specific
+.DS_Store
+Thumbs.db
