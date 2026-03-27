@@ -56,7 +56,8 @@ def request_human_approval(
 
     # Write the review row to Google Sheets
     try:
-        sheets_service.append_review_row(session_id, player_id, player_name, channel)
+        sheet_res = sheets_service.append_review_row(session_id, player_id, player_name, channel)
+        row_number = sheet_res["row_number"]
     except Exception as exc:
         logger.error("❌ Sheet write failed for session=%s player=%s: %s", session_id, player_id, exc)
         return {
@@ -72,6 +73,7 @@ def request_human_approval(
                    f"from channel '{channel}' has been submitted for human review.",
         "session_id": session_id,
         "player_id": player_id,
+        "row_number": row_number,
     }
 
 
