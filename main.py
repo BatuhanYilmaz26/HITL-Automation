@@ -9,14 +9,15 @@ or:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
 from pydantic import BaseModel, Field
 
 import config
@@ -34,7 +35,7 @@ class WebhookPayload(BaseModel):
     session_id: str = Field(..., description="ADK session ID from Column A")
     decision: str = Field(..., description="'Yes' or 'No' from Column I")
     notes: str = Field("", description="Context/notes from Column J")
-    row_data: list = Field(default_factory=list, description="Array of columns A to J")
+    row_data: list[Any] = Field(default_factory=list, description="Array of columns A to J")
 
 
 class WithdrawalRequest(BaseModel):
@@ -48,6 +49,8 @@ class AdaWithdrawalRequest(BaseModel):
     """Payload sent by ADA Chatbot to trigger a withdrawal check."""
 
     player_id: str
+    player_name: str = ""
+    channel: Literal["Chat", "Email"] = "Chat"
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────
@@ -121,7 +124,7 @@ async def webhook(
         "📩 Webhook received: session=%s decision=%s notes=%s",
         payload.session_id,
         payload.decision,
-        payload.notes[:80],
+        payload.notes,
     )
 
     if payload.session_id not in agent_module.pending_sessions:
@@ -174,6 +177,9 @@ async def test_withdrawal(req: WithdrawalRequest):
         result = await agent_module.start_withdrawal(
             session_id=req.session_id,
             player_id=req.player_id,
+            # We add dummy name/channel for the test endpoint
+            player_name="Test-User",
+            channel="Chat",
         )
         return result
     except Exception as exc:
@@ -182,41 +188,84 @@ async def test_withdrawal(req: WithdrawalRequest):
 
 
 @app.post("/ada/v1/request_review")
-async def ada_request_review(req: AdaWithdrawalRequest):
+async def ada_request_review(req: AdaWithdrawalRequest, background_tasks: BackgroundTasks):
     """
     ADA Chatbot endpoint. ADA usually supplies only the player ID.
+    Using BackgroundTasks to ensure API responds < 15s to satisfy Ada webhook requirements.
     """
-    session_id = f"ada-{uuid.uuid4().hex[:8]}"
-    logger.info("🤖 ADA Request via Chatbot: player=%s (generated session=%s)", req.player_id, session_id)
+    logger.info("🤖 ADA Request via Chatbot: player=%s", req.player_id)
+
+    # Note: We've relaxed the idempotency check to support the user's "Delete & Retry" testing flow.
+    # If a duplicate request for the same player arrived, we proceed with a new session ID
+    existing_status = agent_module.player_status.get(req.player_id)
+    if existing_status and existing_status.get("decision") == "pending":
+        logger.info("⏳ Withdrawal already pending for player=%s, but starting new session for tester retry", req.player_id)
+
+    session_id = f"ada-{uuid.uuid4().hex}"
+    logger.info("   ... Generated new session=%s", session_id)
     
-    try:
-        result = await agent_module.start_withdrawal(
-            session_id=session_id,
-            player_id=req.player_id,
-        )
+    # Initialize the status synchronously so that polling works immediately
+    agent_module.player_status[req.player_id] = {
+        "decision": "pending",
+        "notes": "",
+        "row_data": []
+    }
 
-        # Check if the agent actually succeeded
-        status = result.get("status", "")
-        if status == "pending_human_review":
-            return {
-                "status": "pending_human_review",
-                "session_id": result.get("session_id", session_id),
-            }
-        elif status == "completed_unexpected":
-            logger.error("Agent did not escalate to HITL for player=%s", req.player_id)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Agent failed to escalate withdrawal for {req.player_id} to human review.",
-            )
-        else:
-            logger.error("Unexpected result status '%s' for player=%s", status, req.player_id)
-            raise HTTPException(status_code=500, detail=f"Unexpected status: {status}")
+    async def bg_task(pid: str = req.player_id, pname: str = req.player_name, pchannel: str = req.channel, base_sid: str = session_id):
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            # Append attempt number to avoid "session already exists" errors on retry
+            current_sid = f"{base_sid}-{attempt}" if attempt > 0 else base_sid
+            
+            try:
+                result = await agent_module.start_withdrawal(
+                    session_id=current_sid,
+                    player_id=pid,
+                    player_name=pname,
+                    channel=pchannel,
+                )
 
-    except HTTPException:
-        raise  # Re-raise our own HTTPExceptions
-    except Exception as exc:
-        logger.exception("Error starting ADA withdrawal %s", session_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+                # Check if the agent actually succeeded
+                status = result.get("status", "")
+                if status == "pending_human_review":
+                    logger.info("✅ Agent pending human review for player=%s (attempt %d)", pid, attempt + 1)
+                    return  # Success, exit the background task
+                elif status == "completed_unexpected":
+                    logger.error("❌ Agent did not escalate to HITL for player=%s", pid)
+                    agent_module.player_status[pid] = {
+                        "decision": "error",
+                        "notes": "Agent failed to escalate withdrawal to human review.",
+                        "row_data": []
+                    }
+                    return
+                else:
+                    logger.error("❌ Unexpected result status '%s' for player=%s", status, pid)
+                    agent_module.player_status[pid] = {
+                        "decision": "error",
+                        "notes": f"Unexpected status: {status}",
+                        "row_data": []
+                    }
+                    return
+
+            except Exception as exc:
+                if attempt < max_attempts - 1:
+                    logger.warning("⚠️ Transient error for ADA withdrawal %s (attempt %d). Retrying...: %s", current_sid, attempt + 1, str(exc))
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    logger.exception("🚨 Error starting ADA withdrawal %s after %d attempts", current_sid, max_attempts)
+                    agent_module.player_status[pid] = {
+                        "decision": "error",
+                        "notes": f"Internal server error: {exc}",
+                        "row_data": []
+                    }
+
+    # Offload the LLM call to async background task
+    background_tasks.add_task(bg_task)
+
+    return {
+        "status": "pending_human_review",
+        "session_id": session_id,
+    }
 
 
 @app.get("/ada/v1/status/{player_id}")

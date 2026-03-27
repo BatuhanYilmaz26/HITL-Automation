@@ -90,13 +90,17 @@ _append_lock = threading.Lock()
 def append_review_row(
     session_id: str,
     player_id: str,
+    player_name: str = "",
+    channel: str = "Chat",
 ) -> dict[str, Any]:
     """
-    Find the next available row in Column C (starting from row 5 due to headers)
-    and update it with the Session ID and Player ID, leaving B blank for Apps Script.
-
-    Uses a thread lock to ensure concurrent requests don't overwrite the same row,
-    and retries with exponential backoff for transient Sheets API errors.
+    Find the next available row and update it with Session ID, Player ID, Name, and Channel.
+    - Column A: Empty (Legacy alignment)
+    - Column B: Timestamp (filled by Apps Script)
+    - Column C: Player ID
+    - Column D: Player Name
+    - Column E: Channel
+    - Column K: Session ID (Hidden)
     """
     service = get_sheets_service()
 
@@ -113,8 +117,6 @@ def append_review_row(
             values = col_c_data.get("values", [])
 
             # Find the first truly empty row after ALL filled rows.
-            # We scan the entire column and take the position after the
-            # last non-empty cell, so gaps in the middle are skipped.
             last_filled_index = -1
             for i, row in enumerate(values):
                 if row and row[0].strip():
@@ -125,12 +127,17 @@ def append_review_row(
             logger.exception("Failed to fetch Column C to find empty row.")
             raise
 
-        range_notation = f"{config.SHEET_NAME}!A{next_row}:C{next_row}"
+        range_notation = f"{config.SHEET_NAME}!A{next_row}:K{next_row}"
 
+        # Mapping for the HITL dashboard
         row_data = [
-            session_id,  # A — Session ID
-            "",          # B — Timestamp (filled by Apps Script)
+            "",          # A — Empty
+            "",          # B — Timestamp
             player_id,   # C — Player ID
+            player_name, # D — Player Name
+            channel,     # E — Channel
+            "", "", "", "", "", # F through J (Empty)
+            session_id,  # K — Session ID
         ]
 
         try:

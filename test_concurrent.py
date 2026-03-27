@@ -55,15 +55,24 @@ async def fire_request(
     session: aiohttp.ClientSession,
     base_url: str,
     player_id: str,
+    index: int = 0,
 ) -> TestResult:
     """Send a single POST /ada/v1/request_review and return the result."""
     url = f"{base_url}/ada/v1/request_review"
     result = TestResult(player_id=player_id)
     t0 = time.perf_counter()
+
+    # Alternate between Chat and Email for testing
+    channel = "Chat" if index % 2 == 0 else "Email"
+
     try:
         async with session.post(
             url,
-            json={"player_id": player_id},
+            json={
+                "player_id": player_id,
+                "player_name": f"Tester-{player_id}",
+                "channel": channel,
+            },
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
         ) as resp:
             result.status_code = resp.status
@@ -108,9 +117,10 @@ async def fire_batch(
     session: aiohttp.ClientSession,
     base_url: str,
     player_ids: list[str],
+    start_index: int = 0,
 ) -> list[TestResult]:
     """Fire a batch of requests concurrently and return results."""
-    tasks = [fire_request(session, base_url, pid) for pid in player_ids]
+    tasks = [fire_request(session, base_url, pid, start_index + i) for i, pid in enumerate(player_ids)]
     raw = await asyncio.gather(*tasks, return_exceptions=True)
     results: list[TestResult] = []
     for i, r in enumerate(raw):
@@ -160,9 +170,9 @@ async def run_test(
             print(f"🚀 Phase 1: Firing {count} requests in {total_batches} batches of ≤{batch_size} ...")
             print()
 
-            for batch_num, batch in enumerate(batches, 1):
-                print(f"  📦 Batch {batch_num}/{total_batches}: {', '.join(batch)}")
-                batch_results = await fire_batch(session, base_url, batch)
+            for batch_num, batch in enumerate(batches, 0):
+                print(f"  📦 Batch {batch_num + 1}/{total_batches}: {', '.join(batch)}")
+                batch_results = await fire_batch(session, base_url, batch, batch_num * batch_size)
 
                 for r in batch_results:
                     status_str = f"{r.status_code}" if r.status_code else "ERR"

@@ -90,17 +90,23 @@ To allow the backend to edit your Google Sheet securely, you need a Service Acco
 
 ### 5. Google Sheet Setup
 
-Create a Google Sheet with **4 header rows**. Data must start at Row 5. Note: The backend will auto-insert into Column A (Session ID) and Column C (Player ID).
+Create a Google Sheet with **4 header rows**. Data must start at Row 5. The backend automatically leaves Column A empty to match your legacy dashboard and puts the **Session ID in Column K**.
 
 **Important:** Click **Share** on your Google Sheet and share it with the Service Account email you copied in Step 4, setting the role to **Editor**.
 
-| A          | B         | C         | D           | E              | F  | G  | H     | I        | J     |
-| ---------- | --------- | --------- | ----------- | -------------- | -- | -- | ----- | -------- | ----- |
-| Session ID | Timestamp | Player ID | Player Name | Contact Method | — | — | Agent | Decision | Notes |
+| A | B | C | D | E | F | G | H | I | J | K |
+|---|---|---|---|---|---|---|---|---|---|---|
+| (Empty) | Timestamp | Player ID | Player Name | Channel | - | - | Agent | Decision | Notes | Session ID |
 
-- **Rows 1-4**: Reserved for your descriptive headers, warnings, and spreadsheet titles. Data starts at Row 5.
-- **Column B**: Automatically stamped by the Apps Script `onChange` trigger when Player ID populates.
-- **Column I**: Add a data-validation dropdown → `Yes, No`
+- **Column A**: Left empty by the backend (Legacy Style).
+- **Column B**: Automated Timestamp (Format: `yyyy-MM-dd, HH:mm:ss`). 
+  - **TIP**: Select Column B and set **Format -> Number -> Plain Text** to preserve the comma and leading zeros.
+- **Column C**: Player ID.
+- **Column D**: Player Name.
+- **Column E**: Channel (Dropdown: `Chat` or `Email`).
+- **Column I**: Decision Dropdown (`Yes`, `No`).
+- **Column J**: Human Notes.
+- **Column K**: Session ID (Index 11 - Hidden/Reference).
 
 ### 6. Apps Script Setup
 
@@ -128,63 +134,79 @@ ngrok http 8000
 
 Copy the `https://xxxx.ngrok-free.app` URL into `apps_script.js`.
 
+---
+
 ## ADA Chatbot Integration Guide
 
 To connect your ADA Chatbot to this automation system, you need to configure two API calls inside ADA:
 
 ### 1. Trigger the Request (POST)
-When a player requests a withdrawal, ADA sends the `player_id` to the backend.
+When a player requests a withdrawal, ADA sends the details to the backend.
 - **Endpoint**: `POST http://<your-server-ip>:8000/ada/v1/request_review`
 - **Headers**: `"Content-Type": "application/json"`
 - **JSON Body**: 
   ```json
-  { "player_id": "P100" }
+  { 
+    "player_id": "P100", 
+    "player_name": "Batuhan", 
+    "channel": "Chat" 
+  }
   ```
-*Action*: This creates a new session and instantly adds the `P100` row to the Google Sheet for human review.
+- **Channel**: Supports `Chat` or `Email` (matches your sheet's dropdown).
+
+*Action*: This creates a new session and instantly adds the metadata to Columns C, D, and E in the Google Sheet.
 
 ### 2. Poll for the Decision (GET)
-ADA should be set up to poll this endpoint automatically (e.g., every 5-10 seconds) to check if the human payment agent has finished reviewing the sheet.
-- **Endpoint**: `GET http://<your-server-ip>:8000/ada/v1/status/{player_id}`
-  *(Replace `{player_id}` dynamically with the player's ID, e.g., `/ada/v1/status/P100`)*
+ADA should be set up to poll this endpoint automatically (e.g., every 10-15 seconds) to check if the human payment agent has finished reviewing the sheet.
 
-*Action*: While the human is still reviewing, this returns `"decision": "pending"`. The exact moment the human agent finishes typing their Notes in Column J, the Google Sheet sends a webhook. The very next time ADA polls this GET endpoint, it will instantly receive the finalized JSON with all 10 columns:
+**Endpoint**: `GET http://<your-server-ip>:8000/ada/v1/status/{player_id}`
+*(Replace `{player_id}` dynamically with the player's ID, e.g., `/ada/v1/status/P100`)*
+
+#### How it works for stakeholders:
+1.  **Initial State**: Until a human reviews the sheet, this call returns `"decision": "pending"`.
+2.  **The Trigger**: The exact moment the human agent finishes typing their **Notes (Column J)** in the Google Sheet, the Apps Script `onEdit` trigger fires a webhook to the FastAPI backend.
+3.  **Real-Time Retrieval**: The very next time the ADA Chatbot calls this `GET` endpoint, it will instantly receive the finalized JSON with all 10 columns of data (Decision, Notes, timestamp, etc.).
+
+**Finalized JSON Example**:
 ```json
 {
   "player_id": "P100",
   "decision": "Yes",
   "notes": "Verified manually",
   "row_data": [
-    "ada-xxxx",
-    "2026-03-22T19:00:00.000Z",
-    "P100",
-    "", "", "", "", "",
-    "Yes",
-    "Verified manually"
+    "",                      // Column A (Empty)
+    "2026-03-27, 01:00:28",  // Column B (Timestamp)
+    "P100",                  // Column C (Player ID)
+    "Batuhan",               // Column D (Player Name)
+    "Chat",                  // Column E (Channel)
+    "", "", "",              // Columns F-H
+    "Yes",                   // Column I (Decision)
+    "Verified manually",     // Column J (Notes)
+    "ada-5c7ba49b..."        // Column K (Session ID)
   ]
 }
 ```
+*This architecture ensures the ADA chatbot remains responsive while waiting for high-stakes human decisions.*
 
 ---
 
 ## Testing
 
-### Single Request
+### Single Request (Enriched)
 
 ```powershell
-# Submit a withdrawal via ADA endpoint
+# 1. Submit a withdrawal with Name and Channel
 Invoke-RestMethod -Uri "http://localhost:8000/ada/v1/request_review" `
   -Method Post `
   -Headers @{"Content-Type"="application/json"} `
-  -Body '{"player_id":"P100"}'
+  -Body '{"player_id":"P100", "player_name":"Batuhan", "channel":"Chat"}'
 
-# Poll status for the player (will return "pending" initially)
+# 2. Go to Google Sheets and simulate human review:
+#   - Decision (Column I) = 'Yes'
+#   - Notes (Column J) = 'Verified manually'
+
+# 3. Poll status
 Invoke-RestMethod -Uri "http://localhost:8000/ada/v1/status/P100"
-
-# Simulate human approval (Alternatively, edit Column I in the Sheet directly!)
-Invoke-RestMethod -Uri "http://localhost:8000/webhook" `
-  -Method Post `
-  -Headers @{"Content-Type"="application/json"} `
-  -Body '{"session_id":"<SESSION_ID_FROM_RESPONSE>","decision":"Yes","notes":"Verified manually"}'
 ```
 
 ### Concurrency Stress Test
@@ -229,3 +251,37 @@ The test script will:
 - **FastAPI + Uvicorn** — Async HTTP server
 - **Google Sheets API** — HITL dashboard bridge
 - **Google Apps Script** — `onEdit` and `onChange` spreadsheet triggers
+
+---
+
+## 🚀 Transitioning to Enterprise (Google Cloud)
+
+To transition this local demo to a production-grade environment on Google Cloud using a **Gemini Enterprise plan**, the focus shifts to **Statelessness, Security, and Compliance.**
+
+### 1. The Enterprise Tech Stack
+
+| Local Component | Enterprise Cloud Equivalent | Why? |
+|-----------------|-----------------------------|------|
+| **AI Studio** (`GEMINI_API_KEY`) | **Vertex AI (Enterprise)** | Enterprise data privacy guarantees (Google does not use prompts for training). |
+| **Local Machine + ngrok** | **Google Cloud Run** | Fully managed serverless compute that scales to zero when idle and infinitely under load. |
+| **In-memory Dictionary** | **Google Cloud Firestore** | Cloud Run is stateless; Firestore provides persistent JSON session storage for paused ADK Runners. |
+| **`.env` files** | **Secret Manager + IAM** | Eliminates plain-text secrets; permissions are managed via Identity and Access Management (IAM). |
+| **Console Prints** | **Cloud Logging** | Structured JSON logs for full audit trails of every payment decision. |
+
+### 2. Architectural Upgrades
+
+#### AI & Data Privacy
+Deploying via **Vertex AI** ensures total compliance for enterprise payment data. Authentication is handled automatically via Application Default Credentials (IAM), eliminating the need for hardcoded API keys.
+
+#### Scalability & Statelessness
+By replacing local memory with **Cloud Firestore**, the system becomes horizontally scalable. If 1,000 approvals happen at once, Cloud Run spins up multiple containers, each pulling the necessary session state from Firestore to resume a transaction.
+
+#### Enterprise Security
+Deploying to Cloud Run with authentication required (`--no-allow-unauthenticated`) ensures the webhook is invisible to the public internet. Google Apps Script is configured to pass an **OAuth2 Identity Token**, so only your authorized Google Sheet can trigger the agent.
+
+### 3. Deployment Summary
+
+1.  **Containerize**: Package the FastAPI app into a Docker container.
+2.  **Deploy**: Use `gcloud run deploy` to a low-latency region (e.g., `europe-west1`).
+3.  **Permissions**: Assign a dedicated Service Account with specific roles for Firestore and Vertex AI.
+4.  **Connect**: Point the Apps Script `WEBHOOK_URL` to the secure Cloud Run service URL.

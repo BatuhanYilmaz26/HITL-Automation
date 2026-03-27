@@ -33,9 +33,10 @@ Process every incoming withdrawal request by submitting it for
 **mandatory human verification**.  No withdrawal is ever auto-approved.
 
 ## What To Do For Every Request
-1. Receive the withdrawal details (session_id, player_id).
-2. Immediately call `request_human_approval` with **both parameters**:
-   session_id and player_id.
+1. Receive the withdrawal details (session_id, player_id, and optionally
+   player_name and channel).
+2. Immediately call `request_human_approval` with ALL available parameters:
+   session_id, player_id, player_name, and channel.
 3. STOP and wait — a human reviewer will verify the request via the
    HITL dashboard.
 
@@ -95,13 +96,8 @@ player_status: dict[str, dict[str, str]] = {}
 # Free tier: lower to 2-3 via LLM_CONCURRENCY_LIMIT env var.
 _llm_semaphore = asyncio.Semaphore(config.LLM_CONCURRENCY_LIMIT)
 
-# ── Retry settings ──────────────────────────────────────────────────
-LLM_MAX_RETRIES = 3
-LLM_RETRY_DELAYS = [15, 30, 60]  # seconds between retries
-
 
 # ── Helper: extract long-running call/response from events ──────────
-
 
 def _extract_long_running_function_call(
     event: Any,
@@ -140,19 +136,14 @@ def _extract_function_response(
             return part.function_response
     return None
 
-
-def _is_rate_limit_error(exc: Exception) -> bool:
-    """Check if an exception is a rate-limit / quota error."""
-    exc_str = str(exc)
-    return "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str
-
-
 # ── Public API ───────────────────────────────────────────────────────
 
 
 async def start_withdrawal(
     session_id: str,
     player_id: str,
+    player_name: str = "",
+    channel: str = "Chat",
 ) -> dict[str, Any]:
     """
     Kick off a new withdrawal flow.
@@ -169,8 +160,8 @@ async def start_withdrawal(
     Returns a summary dict.
     """
     logger.info(
-        "➡️  Starting withdrawal: session=%s player=%s",
-        session_id, player_id,
+        "➡️  Starting withdrawal: session=%s player=%s name=%s channel=%s",
+        session_id, player_id, player_name, channel,
     )
 
     player_status[player_id] = {"decision": "pending", "notes": "", "row_data": []}
@@ -178,7 +169,9 @@ async def start_withdrawal(
     prompt = (
         f"Process withdrawal request:\n"
         f"- Session ID: {session_id}\n"
-        f"- Player ID: {player_id}"
+        f"- Player ID: {player_id}\n"
+        f"- Player Name: {player_name}\n"
+        f"- Channel: {channel}"
     )
 
     content = types.Content(
@@ -186,84 +179,60 @@ async def start_withdrawal(
         parts=[types.Part(text=prompt)],
     )
 
-    # Retry loop for LLM rate-limit (429) errors
-    current_session_id = session_id
+    # Create a session for this request
+    session = await runner.session_service.create_session(
+        app_name=config.APP_NAME,
+        user_id=config.USER_ID,
+        session_id=session_id,
+    )
 
-    for attempt in range(LLM_MAX_RETRIES + 1):
-        # Create a fresh session for this attempt
-        session = await runner.session_service.create_session(
-            app_name=config.APP_NAME,
-            user_id=config.USER_ID,
-            session_id=current_session_id,
+    long_running_fc: types.FunctionCall | None = None
+    long_running_fr: types.FunctionResponse | None = None
+    agent_texts: list[str] = []
+
+    # Semaphore throttles how many LLM calls run simultaneously
+    async with _llm_semaphore:
+        logger.debug(
+            "🔓 Semaphore acquired for session=%s",
+            session_id,
         )
+        async for event in runner.run_async(
+            session_id=session.id,
+            user_id=config.USER_ID,
+            new_message=content,
+        ):
+            # Try to capture the long-running function call
+            if not long_running_fc:
+                long_running_fc = _extract_long_running_function_call(event)
+            elif long_running_fc:
+                potential = _extract_function_response(event, long_running_fc.id)
+                if potential:
+                    long_running_fr = potential
 
-        long_running_fc: types.FunctionCall | None = None
-        long_running_fr: types.FunctionResponse | None = None
-        agent_texts: list[str] = []
-
-        try:
-            # Semaphore throttles how many LLM calls run simultaneously
-            async with _llm_semaphore:
-                logger.debug(
-                    "🔓 Semaphore acquired for session=%s (attempt %d)",
-                    current_session_id, attempt + 1,
-                )
-                async for event in runner.run_async(
-                    session_id=session.id,
-                    user_id=config.USER_ID,
-                    new_message=content,
-                ):
-                    # Try to capture the long-running function call
-                    if not long_running_fc:
-                        long_running_fc = _extract_long_running_function_call(event)
-                    elif long_running_fc:
-                        potential = _extract_function_response(event, long_running_fc.id)
-                        if potential:
-                            long_running_fr = potential
-
-                    # Collect any text the agent emits
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                agent_texts.append(part.text)
-
-            # If we got here without exception, break out of retry loop
-            break
-
-        except Exception as exc:
-            if _is_rate_limit_error(exc) and attempt < LLM_MAX_RETRIES:
-                delay = LLM_RETRY_DELAYS[attempt]
-                logger.warning(
-                    "⏳ LLM rate-limited (attempt %d/%d), retrying in %ds …",
-                    attempt + 1, LLM_MAX_RETRIES + 1, delay,
-                )
-                await asyncio.sleep(delay)
-
-                # Use a new session ID for the retry
-                current_session_id = f"{session_id}-r{attempt + 1}"
-                continue
-            else:
-                logger.exception("❌ LLM call failed for session %s", current_session_id)
-                raise
+            # Collect any text the agent emits
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        agent_texts.append(part.text)
 
     # Store the pending response for resumption via webhook
     if long_running_fr:
-        pending_sessions[current_session_id] = {
+        pending_sessions[session_id] = {
             "function_response": long_running_fr,
             "player_id": player_id,
         }
-        logger.info("⏸️  Session %s paused — awaiting human decision", current_session_id)
+        logger.info("⏸️  Session %s paused — awaiting human decision", session_id)
         return {
             "status": "pending_human_review",
-            "session_id": current_session_id,
+            "session_id": session_id,
             "agent_message": " ".join(agent_texts) or "Submitted for human review.",
         }
 
     # Fallback — should not normally happen since every withdrawal is escalated
-    logger.warning("⚠️  Session %s completed without HITL escalation", current_session_id)
+    logger.warning("⚠️  Session %s completed without HITL escalation", session_id)
     return {
         "status": "completed_unexpected",
-        "session_id": current_session_id,
+        "session_id": session_id,
         "agent_message": " ".join(agent_texts) or "Withdrawal processed (no HITL).",
     }
 
@@ -317,34 +286,16 @@ async def resume_withdrawal(
 
     agent_texts: list[str] = []
 
-    # Retry loop for LLM rate-limit errors during resume
-    for attempt in range(LLM_MAX_RETRIES + 1):
-        try:
-            async with _llm_semaphore:
-                async for event in runner.run_async(
-                    session_id=session_id,
-                    user_id=config.USER_ID,
-                    new_message=resume_content,
-                ):
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                agent_texts.append(part.text)
-            break  # Success
-
-        except Exception as exc:
-            if _is_rate_limit_error(exc) and attempt < LLM_MAX_RETRIES:
-                delay = LLM_RETRY_DELAYS[attempt]
-                logger.warning(
-                    "⏳ Resume rate-limited (attempt %d/%d), retrying in %ds …",
-                    attempt + 1, LLM_MAX_RETRIES + 1, delay,
-                )
-                await asyncio.sleep(delay)
-                agent_texts.clear()  # Reset for clean retry
-                continue
-            else:
-                logger.exception("❌ Resume LLM call failed for session %s", session_id)
-                raise
+    async with _llm_semaphore:
+        async for event in runner.run_async(
+            session_id=session_id,
+            user_id=config.USER_ID,
+            new_message=resume_content,
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        agent_texts.append(part.text)
 
     # Clean up
     del pending_sessions[session_id]

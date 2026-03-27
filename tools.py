@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 def request_human_approval(
     session_id: str,
     player_id: str,
+    player_name: str = "",
+    channel: str = "Chat",
 ) -> dict[str, Any]:
     """
     Escalate a withdrawal for human review.
@@ -39,20 +41,22 @@ def request_human_approval(
     human verification before processing.
 
     Args:
-        session_id: Unique session identifier for this withdrawal.
-        player_id:  The player requesting the withdrawal.
+        session_id:  Unique session identifier for this withdrawal.
+        player_id:   The player requesting the withdrawal.
+        player_name: Optional name of the player.
+        channel:     The channel where the request originated (e.g., Chat, Email).
 
     Returns:
         A dict with status="pending" so ADK knows to pause.
     """
     logger.info(
-        "🔒 HITL escalation: session=%s player=%s",
-        session_id, player_id,
+        "🔒 HITL escalation: session=%s player=%s name=%s channel=%s",
+        session_id, player_id, player_name, channel,
     )
 
     # Write the review row to Google Sheets
     try:
-        sheets_service.append_review_row(session_id, player_id)
+        sheets_service.append_review_row(session_id, player_id, player_name, channel)
     except Exception as exc:
         logger.error("❌ Sheet write failed for session=%s player=%s: %s", session_id, player_id, exc)
         return {
@@ -64,8 +68,8 @@ def request_human_approval(
 
     return {
         "status": "pending",
-        "message": f"Withdrawal for player {player_id} "
-                   f"has been submitted for human review.",
+        "message": f"Withdrawal for player {player_id} ({player_name}) "
+                   f"from channel '{channel}' has been submitted for human review.",
         "session_id": session_id,
         "player_id": player_id,
     }

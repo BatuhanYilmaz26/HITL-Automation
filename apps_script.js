@@ -16,11 +16,11 @@
 
 // ─── Configuration ──────────────────────────────────────────────────
 
-const WEBHOOK_URL = "https://your-ngrok-url.ngrok-free.app/webhook"; // Replace with your ngrok(webhook) URL
+const WEBHOOK_URL = "https://testurl.com/webhook"; // Replace with your ngrok(webhook) URL
 const WEBHOOK_SECRET = "";  // Must match .env WEBHOOK_SECRET (leave "" to disable)
 
 // Column indices (1-based)
-const COL_SESSION_ID = 1;   // Column A
+const COL_SESSION_ID = 11;   // Column K (Hidden Session ID)
 const COL_DECISION = 9;   // Column I
 const COL_NOTES = 10;  // Column J
 
@@ -50,7 +50,7 @@ function onChange(e) {
     var range = sheet.getRange(startRow, 2, numRows, 2);
     var values = range.getValues();
 
-    var timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+    var timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd, HH:mm:ss");
 
     for (var i = 0; i < values.length; i++) {
       var rowNum = startRow + i;
@@ -59,6 +59,8 @@ function onChange(e) {
 
       // If Player ID exists but Timestamp is empty
       if (cVal && !bVal) {
+        // NOTE: If your sheet formats B as a "Date", it may hide the comma or leading zeros.
+        // For best results, format Column B as 'Plain Text' in your Google Sheet.
         sheet.getRange(rowNum, 2).setValue(timestamp);
         Logger.log("Added timestamp for row " + rowNum);
       }
@@ -104,7 +106,7 @@ function onEdit(e) {
     // Convert Date objects to GMT+1 strings so they don't get stringified to GMT (Z)
     for (var i = 0; i < fullRowData.length; i++) {
       if (Object.prototype.toString.call(fullRowData[i]) === '[object Date]') {
-        fullRowData[i] = Utilities.formatDate(fullRowData[i], "GMT+01:00", "yyyy-MM-dd HH:mm:ss");
+        fullRowData[i] = Utilities.formatDate(fullRowData[i], "GMT+01:00", "yyyy-MM-dd, HH:mm:ss");
       }
     }
 
