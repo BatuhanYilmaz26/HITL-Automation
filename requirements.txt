@@ -1,8 +1,3 @@
-# Core ADK agent framework (LongRunningFnTool, InMemoryRunner)
-google-adk>=1.0.0
-
-# Gemini model SDK (types.Content, types.Part, types.FunctionResponse)
-google-genai>=1.0.0
 
 # Google Sheets API v4 client (read/write HITL dashboard rows)
 google-api-python-client>=2.100.0

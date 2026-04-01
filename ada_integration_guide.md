@@ -56,9 +56,9 @@ This action initializes the process and writes a row to Google Sheets.
 
 ### **Response Handling**
 
-ADA needs to capture the `row_number` from our response to use in the next step.
+ADA needs to capture the `session_id` from our response to use in the polling step.
 
-- Map the JSON key `row_number` to a new ADA variable named `meta_row_number`.
+- Map the JSON key `session_id` to a new ADA variable named `meta_session_id`.
 
 ---
 
@@ -69,12 +69,12 @@ This action retrieves the human decision from the specific row in Google Sheets.
 ### **Endpoint Tab**
 
 - **Method**: `GET`
-- **URL**: `https://<your-ngrok-url>.ngrok-free.app/hitl/v1/status/[player_id]/[meta_row_number]`
-  - *Note: Replace `[player_id]` and `[meta_row_number]` with the variables in ADA.*
+- **URL**: `https://<your-ngrok-url>.ngrok-free.app/hitl/v1/status/session/[meta_session_id]`
+  - *Note: Replace `[meta_session_id]` with the variable in ADA.*
 
 ### **Response Handling**
 
-- Map the JSON key `decision` to an ADA variable (e.g., `withdrawal_decision`).
+- Map the JSON key `status` to an ADA variable (e.g., `withdrawal_status`).
 - Map the JSON key `notes` to an ADA variable (e.g., `withdrawal_notes`).
 
 **How these values are retrieved:**
@@ -95,23 +95,12 @@ To make the automation feel seamless for the player:
 2. **Wait Step**: Add a "Wait" block or a small delay.
 3. **Call Action 2**: Periodically poll for the status.
 4. **Condition**:
-   - If `withdrawal_decision` is `pending`, loop back to a wait step.
-   - If `withdrawal_decision` is `Yes` or `No`, show the `withdrawal_notes` to the player.
+   - If `withdrawal_status` is `processing` or `pending_human_review`, loop back to a wait step.
+   - If `withdrawal_status` is `approved` or `rejected`, show the `withdrawal_notes` to the player.
 
 ---
 
-## 5. Rate Limit Guidance
 
-| Gemini Tier                      | RPM Limit | Recommended `LLM_CONCURRENCY_LIMIT` | Recommended Test Configuration      |
-| -------------------------------- | --------- | ------------------------------------- | ----------------------------------- |
-| **Free Tier**              | 5 RPM     | `2`                                 | `--batch-size 2 --batch-delay 65` |
-| **Pay-as-you-go**          | 60 RPM    | `10`                                | `--batch-size 8 --batch-delay 10` |
-| **Enterprise (Vertex AI)** | 1000+ RPM | `50` (default)                      | `--mode burst`                    |
-
-> [!NOTE]
-> The `LLM_CONCURRENCY_LIMIT` environment variable controls how many LLM calls can run simultaneously. Set this in your `.env` file to match your API tier. The system automatically queues excess requests.
-
----
 
 ## 6. Troubleshooting
 
@@ -122,8 +111,7 @@ To make the automation feel seamless for the player:
 | `❌ Missing required environment variables`  | `.env` file is incomplete                | Copy `.env.example` → `.env` and fill in values                  |
 | `HTTP 403` on Sheet write                    | Service account doesn't have Editor access | Share the Google Sheet with the service account email as Editor       |
 | `HTTP 404` on Sheet write                    | Wrong `SPREADSHEET_ID` or `SHEET_NAME` | Double-check both values in `.env`                                  |
-| `429 Resource Exhausted`                     | Too many concurrent LLM calls              | Lower `LLM_CONCURRENCY_LIMIT` (e.g., `2` for free tier)           |
-| Webhook never fires                            | Apps Script triggers not set up            | Create installable triggers in Apps Script → Triggers                |
+| Webhook never fires                          | Apps Script triggers not set up            | Create installable triggers in Apps Script → Triggers                |
 | Webhook fires but 404                          | Server restarted since session was created | Normal — the correction fallback in `/webhook` handles this        |
 | `⛔ WEBHOOK_URL is still set to the default` | Forgot to update Apps Script               | Replace `testurl.com` with your actual ngrok URL                    |
 | `ErrorLog` sheet has entries                 | All 3 webhook retries failed               | Check server is running; manually replay the decision                 |
@@ -134,13 +122,12 @@ To make the automation feel seamless for the player:
 
 | Log Message                                          | Meaning                                     |
 | ---------------------------------------------------- | ------------------------------------------- |
-| `🚀 HITL Payment Automation server starting …`    | Server booted successfully                  |
+| Log Message                                          | Meaning                                     |
+| ---------------------------------------------------- | ------------------------------------------- |
+| `🚀 Asynchronous HITL Payment Automation starting …` | Server booted successfully                  |
 | `🤖 ADA Request via Chatbot: player=...`           | ADA chatbot triggered a withdrawal          |
-| `✅ Agent waiting for human review at row X`       | Agent paused, row written to sheet          |
+| `⚙️ Background Task started`                       | Process background queued                   |
 | `📩 Webhook received: session=... decision=...`    | Human decision received from Apps Script    |
-| `🏁 Session ... finalized: ...`                    | Full cycle complete                         |
-| `📝 Applied human correction to finalized session` | Post-finalization edit received and applied |
-| `🧹 Evicted stale pending session`                 | TTL cleanup removed an old session (>24h)   |
 
 ---
 
@@ -154,12 +141,12 @@ Use this checklist before your first end-to-end demonstration:
 - [ ] Google Sheet is shared with the service account email (Editor role)
 - [ ] Apps Script has both `onEdit` and `onChange` installable triggers
 - [ ] Column B is formatted as **Plain Text** (Format → Number → Plain Text)
-- [ ] Single request test: `POST /hitl/v1/request_review` returns `row_number`
+- [ ] Single request test: `POST /hitl/v1/request_review` returns `status: processing` and `session_id`
 - [ ] Sheet shows new row with Player ID, Name, and Channel
 - [ ] Timestamp appears automatically in Column B
 - [ ] Typing Decision + Notes fires webhook (check server logs for `📩`)
-- [ ] Poll status returns `"decision": "Yes"` with full `row_data`
-- [ ] Concurrency test passes: `python test_concurrent.py --count 4 --batch-size 2`
+- [ ] Poll status returns `"status": "approved"` with full `row_data`
+- [ ] Concurrency test passes: `python test_concurrent.py --count 10`
 
 ---
 
@@ -171,6 +158,6 @@ To ensure everything is working correctly:
 2. Trigger the flow via the ADA chatbot.
 3. Observe the server logs—you should see:
    - `🤖 ADA Request via Chatbot: player=...`
-   - `✅ Agent waiting for human review at row X`
+   - `⚙️  Background Task started`
 4. Edit the Google Sheet (Columns I & J) and verify the chat updates.
 5. Check the `/metrics` endpoint for request counts and success rates.

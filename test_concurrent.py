@@ -5,8 +5,8 @@ Fires multiple POST requests to /hitl/v1/request_review and verifies
 all sessions land correctly.
 
 Supports two modes:
-  - burst:     all requests fire simultaneously (may hit LLM rate limits)
-  - staggered: fires in batches with a pause between batches (respects rate limits)
+  - burst:     all requests fire simultaneously
+  - staggered: fires in batches with a pause between batches
 
 Usage:
     python test_concurrent.py                                  # 15 requests, staggered
@@ -30,9 +30,9 @@ import aiohttp
 
 DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_COUNT = 15
-DEFAULT_BATCH_SIZE = 4       # Gemini free tier = 5 RPM: stay safe with 4
-DEFAULT_BATCH_DELAY = 65     # seconds between batches (to reset the 1-min window)
-REQUEST_TIMEOUT = 180        # seconds per request (LLM + Sheets can be slow)
+DEFAULT_BATCH_SIZE = 10      # requests per batch
+DEFAULT_BATCH_DELAY = 10     # seconds between batches
+REQUEST_TIMEOUT = 180        # seconds per request
 
 
 @dataclass
@@ -86,16 +86,15 @@ async def fire_request(
 async def poll_status(
     session: aiohttp.ClientSession,
     base_url: str,
-    player_id: str,
-    row_number: int,
+    session_id: str,
 ) -> dict:
-    """Poll GET /hitl/v1/status/{player_id}/{row_number}."""
-    url = f"{base_url}/hitl/v1/status/{player_id}/{row_number}"
+    """Poll GET /hitl/v1/status/session/{session_id}."""
+    url = f"{base_url}/hitl/v1/status/session/{session_id}"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             return await resp.json()
     except Exception as exc:
-        return {"player_id": player_id, "error": str(exc)}
+        return {"session_id": session_id, "error": str(exc)}
 
 
 async def get_sessions(
@@ -125,8 +124,7 @@ async def preflight_check(base_url: str) -> bool:
                 if resp.status == 200:
                     data = await resp.json()
                     print(f"  ✅ Server reachable — status={data.get('status')}, "
-                          f"pending={data.get('pending_sessions')}, "
-                          f"model={data.get('model', '?')}")
+                          f"tracked={data.get('tracked_sessions')}")
                     return True
                 else:
                     print(f"  ❌ Server returned HTTP {resp.status}")
@@ -259,18 +257,18 @@ async def run_test(
         poll_tasks = []
         for r in all_results:
             if r.ok:
-                row_num = r.body.get("row_number")
-                poll_tasks.append(poll_status(session, base_url, r.player_id, row_num))
+                session_id = r.body.get("session_id")
+                poll_tasks.append(poll_status(session, base_url, session_id))
 
         statuses = await asyncio.gather(*poll_tasks)
 
         pending_count = 0
         for s in statuses:
-            decision = s.get("decision", "?")
-            marker = "⏳" if decision == "pending" else ("✅" if decision in ("Yes", "No") else "❓")
-            if decision == "pending":
+            decision = s.get("status", "?")
+            marker = "⏳" if decision in ("processing", "pending_human_review") else ("✅" if decision in ("approved", "rejected") else "❓")
+            if decision in ("processing", "pending_human_review"):
                 pending_count += 1
-            print(f"  {marker} {s.get('player_id', '?'):<12} → {decision}")
+            print(f"  {marker} {s.get('player_id', '?'):<12} → {decision} (row: {s.get('row_number', '?')})")
 
         print()
         print(f"  Pending : {pending_count} / {count}")
@@ -279,12 +277,12 @@ async def run_test(
         # ── Phase 3: Check sessions ──────────────────────────────────
         print("📋 Phase 3: Fetching /sessions ...")
         sessions_data = await get_sessions(session, base_url)
-        ses_count = sessions_data.get("pending_count", "?")
-        ses_ids = sessions_data.get("session_ids", [])
-        print(f"  Pending sessions on server: {ses_count}")
-        if ses_ids:
-            for sid in ses_ids:
-                print(f"    • {sid}")
+        ses_count = sessions_data.get("count", "?")
+        ses_data = sessions_data.get("sessions", {})
+        print(f"  Tracked sessions on server: {ses_count}")
+        if ses_data:
+            for sid, stats in ses_data.items():
+                print(f"    • {sid} ({stats.get('status')})")
         print()
 
     # ── Final verdict ────────────────────────────────────────────────

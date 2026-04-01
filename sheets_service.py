@@ -109,7 +109,7 @@ def _retry_api_call(fn, *, description: str = "API call"):
 # ── Public helpers ───────────────────────────────────────────────────
 
 # Global lock to prevent race conditions when appending to Google Sheets.
-# Tool functions run in threads (via ADK), so threading.Lock is correct.
+# BackgroundTasks run in concurrent threads, so threading.Lock safely synchronizes writes.
 _append_lock = threading.Lock()
 
 

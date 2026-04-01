@@ -19,9 +19,9 @@ from dotenv import load_dotenv
 _env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(_env_path)
 
-# ── Google Gemini ────────────────────────────────────────────────────
+
 GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
-MODEL_ID: str = os.getenv("MODEL_ID", "gemini-3-flash-preview")
+
 
 # ── Google Sheets ────────────────────────────────────────────────────
 SPREADSHEET_ID: str = os.getenv("SPREADSHEET_ID", "")
@@ -42,9 +42,6 @@ PORT: int = int(os.getenv("PORT", "8000"))
 APP_NAME: str = "hitl_payment_automation"
 USER_ID: str = "system"  # single-user PoC
 
-# Maximum concurrent LLM calls. Production (Vertex AI / Enterprise): 50.
-# Free tier (5 RPM): set LLM_CONCURRENCY_LIMIT=2 in .env.
-LLM_CONCURRENCY_LIMIT: int = int(os.getenv("LLM_CONCURRENCY_LIMIT", "50"))
 
 # ── Logging ──────────────────────────────────────────────────────────
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)-22s | %(message)s"
