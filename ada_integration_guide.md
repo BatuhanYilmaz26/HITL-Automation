@@ -56,7 +56,7 @@ This action initializes the process and writes a row to Google Sheets.
 
 ### **Response Handling**
 
-ADA needs to capture the `session_id` from our response to use in the polling step.
+ADA needs to capture the `session_id` from the API response to use in the polling step.
 
 - Map the JSON key `session_id` to a new ADA variable named `meta_session_id`.
 
@@ -81,8 +81,8 @@ This action retrieves the human decision from the specific row in Google Sheets.
 
 1. **Human Review**: A human payment agent visits the Google Sheet and reviews the request.
 2. **Decision Entry**: The agent enters a decision ("Yes" or "No") in **Column I** and adds mandatory notes in **Column J**.
-3. **Automated Webhook**: Once both columns are filled, the Google Apps Script `onEdit` trigger automatically sends a webhook to your local server.
-4. **State Sync**: The backend receives the webhook, finishes the AI agent's logic, and updates the status for that specific row.
+3. **Automated Webhook**: Once both columns are filled, the Google Apps Script `onEdit` trigger automatically sends a webhook to the local server.
+4. **State Sync**: The backend receives the webhook and updates the status for that specific row.
 5. **ADA Final Poll**: The next time ADA polls this action, the `decision` will change from `pending` to the human's actual decision, and the `notes` will be populated.
 
 ---
@@ -98,9 +98,32 @@ To make the automation feel seamless for the player:
    - If `withdrawal_status` is `processing` or `pending_human_review`, loop back to a wait step.
    - If `withdrawal_status` is `approved` or `rejected`, show the `withdrawal_notes` to the player.
 
+## 5. API Status Reference
+
+Below is the complete breakdown of all API statuses returned by the system:
+
+### Core Workflow Endpoints
+*   **`POST /hitl/v1/request_review`**
+    *   `processing`: Returned instantly. The request was received and a sequence `session_id` was generated.
+*   **`GET /hitl/v1/status/session/{session_id}`** (ADA Polling)
+    *   `processing`: Request in memory, waiting to be written to Google Sheets.
+    *   `pending_human_review`: Row successfully appended; system is waiting for the human reviewer to enter a decision.
+    *   `approved`: Human reviewer entered "Yes" (Column I).
+    *   `rejected`: Human reviewer entered "No" or anything other than "Yes" (Column I).
+    *   `error`: Background task failed to write to Google Sheets.
+    *   `not_found`: `session_id` does not exist in memory.
+*   **`GET /hitl/v1/status/{player_id}/{row_number}`** (Legacy Polling)
+    *   Same statuses as above, plus `not_found` if the lookup fails.
+
+### Webhook Endpoint
+*   **`POST /webhook`** (Apps Script to Backend)
+    *   `finalized`: Confirms the Apps Script payload was received and parsed.
+
+### System & Admin Endpoints
+*   **`GET /health`**: Returns `ok` when server is alive.
+*   **`GET /sessions`**: Provides raw memory state of all tracked sessions.
+
 ---
-
-
 
 ## 6. Troubleshooting
 

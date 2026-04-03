@@ -91,6 +91,7 @@ This system is designed so that **zero withdrawal requests are missed or skipped
 2. Ensure you have the `.env` file populated.
 3. Configure your Google Service Account logic in `.env`.
 4. Run `python main.py`
+5. Expose localhost with ngrok: `ngrok http 8000`
 
 ### Testing
 ```powershell
