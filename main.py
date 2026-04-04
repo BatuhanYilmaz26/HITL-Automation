@@ -10,6 +10,7 @@ or:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import threading
 import time
@@ -88,8 +89,30 @@ def _extract_player_fields(row_data: list[Any]) -> tuple[str, str, str]:
     )
 
 
+# ── Reconciliation throttle ──────────────────────────────────────────────
+_reconciliation_timestamps: dict[str, float] = {}
+_reconciliation_lock = threading.Lock()
+
+
 def _needs_sheet_reconciliation(session: dict[str, Any]) -> bool:
-    return bool(session.get("row_number")) and session.get("status") == "pending_human_review"
+    """Check if a pending session should be reconciled from Google Sheets.
+
+    Applies a per-session cooldown to avoid excessive Sheets API reads
+    when ADA polls at high frequency across thousands of sessions.
+    """
+    if not session.get("row_number") or session.get("status") != "pending_human_review":
+        return False
+
+    session_id = session["session_id"]
+    now = time.monotonic()
+
+    with _reconciliation_lock:
+        last_check = _reconciliation_timestamps.get(session_id, 0.0)
+        if (now - last_check) < config.RECONCILIATION_COOLDOWN_SECONDS:
+            return False
+        _reconciliation_timestamps[session_id] = now
+
+    return True
 
 
 def _reconcile_session_from_sheet(session: dict[str, Any]) -> dict[str, Any]:
@@ -199,6 +222,16 @@ async def _cleanup_worker() -> None:
             if removed:
                 _increment_metric("sessions_expired", removed)
                 logger.info("Expired %d old session(s)", removed)
+
+            # Prune stale reconciliation cache entries
+            now = time.monotonic()
+            cutoff = config.RECONCILIATION_COOLDOWN_SECONDS * 10
+            with _reconciliation_lock:
+                stale = [sid for sid, ts in _reconciliation_timestamps.items() if (now - ts) > cutoff]
+                for sid in stale:
+                    del _reconciliation_timestamps[sid]
+                if stale:
+                    logger.debug("Pruned %d stale reconciliation cache entries", len(stale))
     except asyncio.CancelledError:
         logger.info("Stopped session cleanup worker")
         raise
@@ -346,8 +379,9 @@ async def list_sessions(
 async def webhook(payload: WebhookPayload, x_webhook_secret: str | None = Header(None)):
     """Receives the human decision from Google Apps Script."""
     _increment_metric("webhooks_received")
-    if config.WEBHOOK_SECRET and x_webhook_secret != config.WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="Invalid webhook secret")
+    if config.WEBHOOK_SECRET:
+        if not x_webhook_secret or not hmac.compare_digest(x_webhook_secret, config.WEBHOOK_SECRET):
+            raise HTTPException(status_code=403, detail="Invalid webhook secret")
 
     logger.info(
         "Webhook received: session=%s decision=%s notes=%s",

@@ -73,6 +73,13 @@ REVIEW_WORKER_IDLE_SLEEP_SECONDS: float = _get_float("REVIEW_WORKER_IDLE_SLEEP_S
 REVIEW_JOB_VISIBILITY_TIMEOUT_SECONDS: int = _get_int("REVIEW_JOB_VISIBILITY_TIMEOUT_SECONDS", 300)
 REQUIRE_SERVICE_ACCOUNT: bool = _get_bool("REQUIRE_SERVICE_ACCOUNT", True)
 
+# ── Sheets API Tuning ───────────────────────────────────────────────
+SHEETS_API_CONCURRENT_LIMIT: int = _get_int("SHEETS_API_CONCURRENT_LIMIT", 5)
+SHEETS_CLIENT_TTL_SECONDS: int = _get_int("SHEETS_CLIENT_TTL_SECONDS", 300)
+
+# ── Reconciliation ──────────────────────────────────────────────────
+RECONCILIATION_COOLDOWN_SECONDS: int = _get_int("RECONCILIATION_COOLDOWN_SECONDS", 15)
+
 # ── Application constants ───────────────────────────────────────────
 APP_NAME: str = "hitl_payment_automation"
 USER_ID: str = "system"  # single-user PoC

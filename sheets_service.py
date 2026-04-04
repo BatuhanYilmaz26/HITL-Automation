@@ -1,8 +1,8 @@
 """
 sheets_service.py - Google Sheets API wrapper.
 
-Builds a fresh Sheets client for each operation and provides a helper
-to append a new HITL review row to the configured spreadsheet.
+Caches a thread-local Sheets client, rate-limits Sheets API access,
+and appends HITL review rows with reviewer-facing GMT+2 timestamps.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import socket
 import ssl
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import httplib2
@@ -32,28 +32,44 @@ _auth_log_lock = threading.Lock()
 _auth_mode_logged = False
 
 
+_client_local = threading.local()
+
+
 def get_sheets_service():
-    """Build a fresh Google Sheets API v4 service object for the current operation."""
+    """Build or reuse a thread-local Google Sheets API v4 service object.
+
+    Clients are cached per-thread for config.SHEETS_CLIENT_TTL_SECONDS to
+    avoid re-reading the service account file and re-building the discovery
+    client on every call, while keeping httplib2.Http() thread-isolated.
+    """
+    now = time.monotonic()
+    cached = getattr(_client_local, "service", None)
+    cached_at = getattr(_client_local, "service_created_at", 0.0)
+
+    if cached is not None and (now - cached_at) < config.SHEETS_CLIENT_TTL_SECONDS:
+        return cached
+
     sa_path = config.SERVICE_ACCOUNT_PATH
 
-    # google-api-python-client uses httplib2 underneath, and its Http transport
-    # is not thread-safe. The review workers can run on different threads, so
-    # reusing one global service can trigger socket aborts on Windows.
     if os.path.exists(sa_path):
         creds = Credentials.from_service_account_file(
             sa_path,
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
         _log_auth_mode_once(using_service_account=True, sa_path=sa_path)
-        return build("sheets", "v4", credentials=creds, cache_discovery=False)
+        service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    else:
+        _log_auth_mode_once(using_service_account=False, sa_path=sa_path)
+        service = build(
+            "sheets",
+            "v4",
+            developerKey=config.SHEETS_API_KEY or config.GOOGLE_API_KEY,
+            cache_discovery=False,
+        )
 
-    _log_auth_mode_once(using_service_account=False, sa_path=sa_path)
-    return build(
-        "sheets",
-        "v4",
-        developerKey=config.SHEETS_API_KEY or config.GOOGLE_API_KEY,
-        cache_discovery=False,
-    )
+    _client_local.service = service
+    _client_local.service_created_at = now
+    return service
 
 
 def _log_auth_mode_once(*, using_service_account: bool, sa_path: str) -> None:
@@ -142,8 +158,24 @@ def _retry_api_call(fn: Callable[[], Any], *, description: str = "API call"):
     raise RuntimeError(f"{description} failed after {MAX_RETRIES} retries")
 
 
+# ── Concurrency limiter ──────────────────────────────────────────────
+
+_sheets_semaphore = threading.Semaphore(config.SHEETS_API_CONCURRENT_LIMIT)
+_sheet_timezone = timezone(timedelta(hours=2), name="GMT+2")
+
+
+def _rate_limited_api_call(fn: Callable[[], Any], *, description: str = "API call"):
+    """Execute a Sheets API call with concurrency limiting and retry logic.
+
+    Limits concurrent Sheets API calls across all threads to stay within
+    Google Sheets API quota boundaries at enterprise scale.
+    """
+    with _sheets_semaphore:
+        return _retry_api_call(fn, description=description)
+
+
 def _sheet_timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.now(_sheet_timezone).strftime("%Y-%m-%d %H:%M:%S GMT+2")
 
 
 def append_review_row(
@@ -157,7 +189,7 @@ def append_review_row(
 
     Column layout:
         A - Unused helper column owned by the sheet, not the backend
-        B - Timestamp (written by backend)
+        B - Timestamp in GMT+2 (written by backend)
         C - Player ID
         D - Player Name
         E - Channel
@@ -173,7 +205,7 @@ def append_review_row(
     # The operational contract starts at Column B. Column A stays outside the
     # backend payload so sheet-specific helper data cannot shift the webhook map.
     row_data = [
-        _sheet_timestamp(),  # B - Timestamp (written by backend)
+        _sheet_timestamp(),  # B - Timestamp in GMT+2 (written by backend)
         player_id,   # C - Player ID
         player_name, # D - Player Name
         channel,     # E - Channel
@@ -182,7 +214,7 @@ def append_review_row(
     ]
 
     try:
-        result = _retry_api_call(
+        result = _rate_limited_api_call(
             lambda: get_sheets_service().spreadsheets().values().append(
                 spreadsheetId=config.SPREADSHEET_ID,
                 range=f"{config.SHEET_NAME}!B:K",
@@ -209,7 +241,7 @@ def append_review_row(
 
 def get_review_row(row_number: int) -> dict[str, Any] | None:
     """Fetch a review row using the canonical Columns B:K contract."""
-    result = _retry_api_call(
+    result = _rate_limited_api_call(
         lambda: get_sheets_service().spreadsheets().values().get(
             spreadsheetId=config.SPREADSHEET_ID,
             range=f"{config.SHEET_NAME}!B{row_number}:K{row_number}",

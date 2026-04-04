@@ -14,7 +14,7 @@ Before configuring ADA, ensure your Google Sheet can talk back to your local ser
 
 1. Open your Google Sheet.
 2. Go to **Extensions** → **Apps Script**.
-3. In `apps_script.js`, locate **Line 19**:
+3. In `apps_script.js`, locate the `WEBHOOK_URL` constant:
    ```javascript
    const WEBHOOK_URL = "https://<your-ngrok-url>.ngrok-free.app/webhook";
    ```
@@ -64,7 +64,7 @@ ADA needs to capture the `session_id` from the API response to use in the pollin
 
 ## 3. ADA Action 2: Poll for Decision
 
-This action retrieves the human decision from the specific row in Google Sheets.
+This action retrieves the current session state from the backend. For pending sessions, the backend can also reconcile the row from Google Sheets on a cooldown if the webhook has not arrived yet.
 
 ### **Endpoint Tab**
 
@@ -82,8 +82,8 @@ This action retrieves the human decision from the specific row in Google Sheets.
 1. **Human Review**: A human payment agent visits the Google Sheet and reviews the request.
 2. **Decision Entry**: The agent enters a decision ("Yes" or "No") in **Column I** and adds mandatory notes in **Column J**.
 3. **Automated Webhook**: Once both columns are filled, the Google Apps Script `onEdit` trigger automatically sends a webhook to the local server.
-4. **State Sync**: The backend receives the webhook and updates the status for that specific row.
-5. **ADA Final Poll**: The next time ADA polls this action, the `decision` will change from `pending` to the human's actual decision, and the `notes` will be populated.
+4. **State Sync**: The backend receives the webhook and updates the durable session record.
+5. **ADA Final Poll**: The next time ADA polls this action, the `status` changes from `processing` or `pending_human_review` to the human's final decision, and the `notes` field is populated.
 
 ---
 
@@ -106,12 +106,12 @@ Below is the complete breakdown of all API statuses returned by the system:
 *   **`POST /hitl/v1/request_review`**
     *   `processing`: Returned instantly. The request was received and a sequence `session_id` was generated.
 *   **`GET /hitl/v1/status/session/{session_id}`** (ADA Polling)
-  *   `processing`: Request stored durably and waiting for a review worker to write to Google Sheets.
+    *   `processing`: Request stored durably and waiting for a review worker to write to Google Sheets.
     *   `pending_human_review`: Row successfully appended; system is waiting for the human reviewer to enter a decision.
-    *   `approved`: Human reviewer entered "Yes" (Column I).
-    *   `rejected`: Human reviewer entered "No" or anything other than "Yes" (Column I).
+    *   `approved`: Human reviewer entered "Yes" (Column I) and Notes (Column J).
+    *   `rejected`: Human reviewer entered anything other than "Yes" in Column I and Notes (Column J).
     *   `error`: The review job failed to write to Google Sheets.
-  *   `not_found`: `session_id` does not exist or has expired from retention cleanup.
+    *   `not_found`: `session_id` does not exist or has expired from retention cleanup.
 *   **`GET /hitl/v1/status/{player_id}/{row_number}`** (Legacy Polling)
     *   Same statuses as above, plus `not_found` if the lookup fails.
 
@@ -139,17 +139,17 @@ Below is the complete breakdown of all API statuses returned by the system:
 | `⛔ WEBHOOK_URL is still set to the default` | Forgot to update Apps Script               | Replace `testurl.com` with your actual ngrok URL                    |
 | `ErrorLog` sheet has entries                 | All 3 webhook retries failed               | Check server is running; manually replay the decision                 |
 | Timestamp not appearing in Col B               | Backend write failed before append         | Check server logs and `/metrics` for review job failures |
-| `pending` status never changes               | Notes (Col J) is empty                     | Both Decision AND Notes must be filled for the webhook to fire        |
+| Status remains `pending_human_review` for too long | Webhook did not arrive yet or human review is incomplete | Ensure both Decision and Notes are filled; the status endpoint only reconciles pending rows periodically to protect Sheets quota |
+| `pending_human_review` status never changes | Notes (Col J) is empty or the human decision is incomplete | Both Decision AND Notes must be filled for the webhook to fire        |
 
 ### Server Logs to Look For
 
 | Log Message                                          | Meaning                                     |
 | ---------------------------------------------------- | ------------------------------------------- |
-| Log Message                                          | Meaning                                     |
-| ---------------------------------------------------- | ------------------------------------------- |
 | `Durable HITL Payment Automation starting`        | Server booted successfully                  |
 | `ADA Request via Chatbot: player=...`             | ADA chatbot triggered a withdrawal          |
 | `Review job started`                              | A worker claimed a queued Sheets write      |
+| `Sheet row appended at row ...`                   | The row was successfully inserted into Google Sheets |
 | `Webhook received: session=... decision=...`      | Human decision received from Apps Script    |
 
 ---
@@ -166,7 +166,7 @@ Use this checklist before your first end-to-end demonstration:
 - [ ] Column B is formatted as **Plain Text** (Format → Number → Plain Text)
 - [ ] Single request test: `POST /hitl/v1/request_review` returns `status: processing` and `session_id`
 - [ ] Sheet shows new row with Player ID, Name, and Channel
-- [ ] Timestamp is written automatically in Column B by the backend append
+- [ ] Timestamp is written automatically in Column B by the backend append in GMT+2
 - [ ] Typing Decision + Notes fires webhook (check server logs for `Webhook received`)
 - [ ] Poll status returns `"status": "approved"` with full `row_data`
 - [ ] Concurrency test passes: `python test_concurrent.py --count 10`
@@ -182,5 +182,6 @@ To ensure everything is working correctly:
 3. Observe the server logs—you should see:
   - `ADA Request via Chatbot: player=...`
   - `Review job started`
+  - `Sheet row appended at row ...`
 4. Edit the Google Sheet (Columns I & J) and verify the chat updates.
 5. Check the `/metrics` endpoint for request counts and success rates.

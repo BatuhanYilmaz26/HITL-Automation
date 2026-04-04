@@ -51,6 +51,9 @@ def _get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA cache_size=-32000")  # ~32 MB
+    conn.execute("PRAGMA mmap_size=268435456")  # 256 MB
     _thread_local.connection = conn
     with _connection_registry_lock:
         _connections.append(conn)
@@ -114,6 +117,9 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_review_jobs_claim
                 ON review_jobs(status, available_at, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
+                ON sessions(updated_at);
             """
         )
         conn.commit()

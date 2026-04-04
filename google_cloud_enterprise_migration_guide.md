@@ -598,9 +598,297 @@ For this company and this use case, the best near-term Google Cloud target is:
 - Cloud Logging, Monitoring, Trace, and Error Reporting for operations
 - Google Sheets retained as the payment-agent review interface
 
+## 15. Scale Analysis: 10,000 Active Players
+
+This section provides a concrete analysis of constraints and limits when the system serves ten thousand active players.
+
+### 15.1 Google Sheets API quotas
+
+Default Sheets API quotas per project:
+
+| Quota | Limit | Impact at 10K players |
+| --- | --- | --- |
+| Read requests | 300 per minute per project | ~5 per second; burst polling exhausts this instantly |
+| Write requests | 300 per minute per project | ~5 per second; high-volume withdrawal windows may spike |
+| Per-user per-minute | 60 per minute | Only relevant if all calls share one service account identity |
+| Cells per spreadsheet | 10 million | A single review sheet fills at ~10 columns × row count |
+
+At 10,000 active players polling every 10–15 seconds, raw status polling generates ~700–1,000 requests per second if every poll hit the Sheets API. The backend already avoids this because status polling reads from the local SQLite database, not from Google Sheets.
+
+### The reconciliation problem
+
+The reconciliation path (`GET /hitl/v1/status/session/{session_id}`) previously called `sheets_service.get_review_row()` on every poll for any pending session. At 10K scale, even a small fraction of pending sessions would exhaust the Sheets read quota immediately.
+
+**Demo optimization applied**: The backend now enforces a per-session reconciliation cooldown (`RECONCILIATION_COOLDOWN_SECONDS`, default 15s). A pending session is only reconciled from the sheet if the last check was more than 15 seconds ago. This reduces Sheets reads from thousands per second to a manageable trickle.
+
+**Enterprise migration mapping**: After migration to Cloud SQL, reconciliation from the sheet becomes unnecessary because the webhook writes to the database directly. Sheets becomes a pure reviewer interface with no backend reads required.
+
+### 15.2 Sheets API client overhead
+
+Building a fresh `google-api-python-client` Sheets service on every API call means re-reading the service account JSON, constructing new credentials, and building a new `httplib2.Http` transport each time. At 10K scale with 4 workers, this is thousands of unnecessary credential operations per hour.
+
+**Demo optimization applied**: Sheets clients are now cached per-thread with a configurable TTL (`SHEETS_CLIENT_TTL_SECONDS`, default 300s). Each worker thread reuses its own cached client, keeping `httplib2.Http` thread-isolated while eliminating redundant credential construction.
+
+**Enterprise migration mapping**: After migration to Cloud Run + Cloud Tasks, the service authenticates using Application Default Credentials with no JSON key file at all.
+
+### 15.3 Concurrency and Sheets API burst protection
+
+Without concurrency control, all 4 review workers plus reconciliation reads could fire simultaneous Sheets API calls, risking 429 responses under load.
+
+**Demo optimization applied**: A `threading.Semaphore` limits concurrent Sheets API calls across all threads (`SHEETS_API_CONCURRENT_LIMIT`, default 5). All Sheets operations now pass through this limiter before retry logic.
+
+**Enterprise migration mapping**: Cloud Tasks provides built-in queue rate limiting which replaces the in-process semaphore.
+
+### 15.4 SQLite performance at scale
+
+SQLite in WAL mode handles concurrent reads well, but at 10K sessions the write lock and cache behavior need tuning.
+
+**Demo optimizations applied**:
+- `PRAGMA busy_timeout=5000`: Writers wait up to 5 seconds for the write lock instead of failing immediately
+- `PRAGMA cache_size=-32000`: ~32 MB in-memory page cache for faster reads
+- `PRAGMA mmap_size=268435456`: 256 MB memory-mapped I/O for reduced syscall overhead
+- Index on `sessions(updated_at)` for efficient cleanup queries at high row counts
+
+**Enterprise migration mapping**: Cloud SQL for PostgreSQL replaces SQLite entirely, with connection pooling and managed HA.
+
+### 15.5 Security hardening
+
+**Demo optimization applied**: Webhook secret validation now uses `hmac.compare_digest()` instead of Python's `!=` operator, preventing timing-based side-channel attacks. This is a requirement for any enterprise-facing webhook endpoint.
+
+**Enterprise migration mapping**: Cloud Armor, IAM-authenticated Cloud Run invocations, and Secret Manager all layer additional security controls.
+
+### 15.6 Throughput math
+
+Estimated throughput at 10K active players assuming 5% submit withdrawals per day:
+
+| Metric | Value |
+| --- | --- |
+| Withdrawal requests per day | ~500 |
+| Peak burst (1-hour window) | ~100–200 requests |
+| Sheets append calls per day | ~500 (one per request) |
+| Sheets reads per day (reconciliation) | ~2,000–3,000 (throttled) |
+| Status polls per day (from ADA) | ~500,000+ (served from SQLite, not Sheets) |
+| Webhook callbacks per day | ~500 (one per human decision) |
+
+The bottleneck is not the backend or database. It is the Google Sheets API quota and human reviewer throughput.
+
+### 15.7 Row volume and sheet management
+
+At 500 rows per day, a single sheet reaches 15,000 rows per month. Google Sheets performance degrades noticeably above 50,000–100,000 rows with formulas, filters, and formatting.
+
+Recommended operational practices:
+- Archive completed review rows weekly or monthly
+- Shard active review sheets by date, team, or region if needed
+- Use protected headers and data validation in the Decision column
+- Set conditional formatting on the review sheet sparingly
+
+## 16. Demo Code Optimizations and Enterprise Mapping
+
+The following table summarizes every optimization applied to the demo codebase and its corresponding enterprise migration path:
+
+| Demo optimization | File | Enterprise equivalent |
+| --- | --- | --- |
+| Thread-local cached Sheets client with TTL | `sheets_service.py` | ADC-authenticated Cloud Run service account; no JSON key or local caching needed |
+| Semaphore-based Sheets API concurrency limit | `sheets_service.py` | Cloud Tasks queue rate limiting and max concurrent dispatches |
+| Per-session reconciliation cooldown | `main.py` | Cloud SQL is source of truth; no Sheets reconciliation needed |
+| Reconciliation cache cleanup in background worker | `main.py` | Cloud Scheduler + Cloud Run Jobs for periodic housekeeping |
+| Timing-safe webhook secret comparison | `main.py` | Cloud Armor + IAM-authenticated invocations replace shared secrets |
+| SQLite WAL mode + tuned pragmas | `session_store.py` | Cloud SQL for PostgreSQL with managed HA and connection pooling |
+| Updated index on `sessions(updated_at)` | `session_store.py` | PostgreSQL indexes on equivalent tables |
+| Configurable tuning parameters | `config.py` | Secret Manager for secrets; environment variables in Cloud Run for non-secret config |
+| Durable review job queue in SQLite | `session_store.py` | Cloud Tasks with at-least-once delivery and deduplication |
+
+## 17. Testing and Validation Strategy
+
+### 17.1 Demo validation checklist
+
+Before the shareholder demo:
+
+1. Start server with `python main.py` and confirm healthy startup logs
+2. Run `python test_concurrent.py --count 50 --mode staggered --batch-size 10` to stress test
+3. Verify all 50 rows appear in Google Sheets with correct timestamps, player IDs, and session IDs
+4. Enter Decision + Notes on 5–10 rows and verify webhook delivery in server logs
+5. Poll status endpoints and confirm `approved`/`rejected` results
+6. Check `/metrics` for counters and zero failures
+7. Check `/health` for queue depth returning to 0
+8. Verify no entries in the `ErrorLog` sheet tab
+
+### 17.2 Enterprise migration validation
+
+Each migration phase should include validation gates:
+
+**Phase 1 – Hosting foundation**:
+- Cloud Run service starts and responds to `/health`
+- ADA.cx can reach the Cloud Run URL
+- Apps Script can reach the Cloud Run webhook endpoint
+- Secret Manager secrets are accessible at runtime
+- Cloud Build successfully builds and deploys the container
+
+**Phase 2 – Durable state and async control**:
+- Cloud SQL stores sessions and review jobs correctly
+- Cloud Tasks enqueues and delivers append tasks
+- Idempotent append handlers survive duplicate delivery
+- Sheets rows appear correctly from Cloud Tasks workers
+- Webhook callbacks update Cloud SQL state
+- ADA polling returns correct statuses from Cloud SQL
+
+**Phase 3 – Observability**:
+- Structured logs appear in Cloud Logging with correct fields
+- Error Reporting groups exceptions meaningfully
+- Cloud Trace shows end-to-end latency breakdowns
+- Dashboard shows live request, queue, and error metrics
+- Alerts fire correctly on simulated failures
+
+**Phase 4 – Security and governance**:
+- No service account JSON keys exist in the runtime environment
+- Cloud Armor blocks unauthorized traffic
+- Audit logs capture secret access and deployment actions
+- IAM policy review confirms least privilege
+
+**Phase 5 – Production scale-up**:
+- Load test with simulated 10K polling clients
+- Cloud Tasks queue rate limits protect Sheets API quotas
+- Cloud Run autoscaling respects Cloud SQL connection limits
+- Archival jobs execute on schedule and reduce active sheet row count
+- SLA monitoring dashboards show acceptable latency
+
+### 17.3 Load test recommendations
+
+Use the following load test patterns before production:
+
+| Test | Tool | Target |
+| --- | --- | --- |
+| API response time under load | `locust` or `k6` | Cloud Run `/hitl/v1/request_review` and `/hitl/v1/status/session/*` |
+| Queue throughput | `test_concurrent.py` enhanced | Cloud Tasks → Sheets append at rate limit |
+| Polling scalability | `k6` with sustained connections | 10K concurrent GET requests to status endpoint |
+| Webhook delivery under failure | Manual or chaos testing | Kill Cloud Run mid-webhook; verify retry and recovery |
+| Database connection saturation | `pgbench` or application load | Cloud SQL at max Cloud Run instances |
+
+## 18. Cost Estimation
+
+Approximate monthly costs for the recommended architecture at 10K active players, 500 withdrawals/day:
+
+| Service | Configuration | Estimated monthly cost (USD) |
+| --- | --- | --- |
+| Cloud Run (API) | 1 vCPU, 512 MB, min 1 instance, max 10 instances | $15–$40 |
+| Cloud Run (Worker) | 1 vCPU, 512 MB, task-driven, no min instances | $5–$15 |
+| Cloud SQL for PostgreSQL | db-f1-micro or db-g1-small, 10 GB SSD, single zone (demo) | $10–$30 |
+| Cloud SQL for PostgreSQL | db-custom-2-4096, HA, 50 GB SSD (production) | $80–$150 |
+| Cloud Tasks | 500 tasks/day, ~15K/month | Free tier (first 1M tasks/month free) |
+| Secret Manager | 5–10 secrets, low access frequency | < $1 |
+| Artifact Registry | Standard repository, < 5 GB images | < $1 |
+| Cloud Build | < 120 build-minutes/day | Free tier (first 120 min/day free) |
+| Cloud Logging | < 50 GB/month ingestion | First 50 GB free |
+| Cloud Monitoring | Standard metrics and dashboards | Free for most GCP metrics |
+| Cloud Armor | Standard tier, basic WAF rules | $5–$10 |
+| Networking (egress) | Low egress volume | < $5 |
+
+**Demo cost**: ~$30–$50/month (single zone, minimal instances, no HA).
+
+**Production cost**: ~$120–$250/month (HA database, autoscaling, Cloud Armor, full observability).
+
+Note: All costs depend on region, sustained use discounts, and committed use discounts. Verify pricing at [cloud.google.com/pricing](https://cloud.google.com/pricing).
+
+## 19. Rollback Procedures
+
+Each migration phase should have a documented rollback path:
+
+### Phase 1 rollback (hosting)
+
+If Cloud Run deployment fails or ADA.cx cannot reach the new endpoint:
+- Revert ADA.cx to the previous ngrok or local server URL
+- Revert Apps Script `WEBHOOK_URL` to the previous value
+- The local server and SQLite database remain unchanged and operational
+
+### Phase 2 rollback (state and async)
+
+If Cloud SQL or Cloud Tasks integration causes data issues:
+- Switch the application config to point back to SQLite
+- Drain the Cloud Tasks queue (pending tasks will retry until drained)
+- Verify no data was lost by comparing Cloud SQL sessions with the Google Sheet
+- Re-deploy the SQLite-backed container to Cloud Run
+
+### Phase 3 rollback (observability)
+
+Observability is additive. Rollback means removing Cloud Logging handlers and OpenTelemetry instrumentation from the application code. The application still works without them.
+
+### Phase 4 rollback (security)
+
+Cloud Armor and API management layers sit in front of Cloud Run. Rollback means removing the load balancer rules and allowing direct Cloud Run access. IAM policy changes can be reverted through policy version history.
+
+### Phase 5 rollback (scale-up)
+
+Reduce Cloud Run max instances and Cloud Tasks queue rates back to demo levels. Disable archival jobs in Cloud Scheduler. The system returns to demo-scale operation.
+
+## 20. ADA.cx Integration After Migration
+
+### 20.1 Endpoint changes
+
+After migration, ADA.cx configuration changes:
+
+| Setting | Demo value | Enterprise value |
+| --- | --- | --- |
+| Base URL | `https://<ngrok-url>.ngrok-free.app` | `https://hitl-api.<company-domain>.com` (custom domain on Cloud Run) |
+| Request endpoint | `POST /hitl/v1/request_review` | Same path, Cloud Run host |
+| Status endpoint | `GET /hitl/v1/status/session/{session_id}` | Same path, Cloud Run host |
+| Authentication | None (open endpoint) | API key header or OAuth token, validated by Cloud Armor or the API layer |
+
+### 20.2 Apps Script changes
+
+| Setting | Demo value | Enterprise value |
+| --- | --- | --- |
+| `WEBHOOK_URL` | ngrok URL | Cloud Run service URL or custom domain |
+| `WEBHOOK_SECRET` | Shared plaintext secret | Secret rotated via Secret Manager; or replaced by IAM-authenticated Cloud Run invocation |
+| Retry behavior | 3 retries in Apps Script | Cloud Run + Cloud Tasks handle retries; Apps Script still retries as a safety net |
+
+### 20.3 Polling behavior
+
+ADA.cx polling frequency should remain at 10–15 seconds. The Cloud Run status endpoint reads from Cloud SQL, not Google Sheets, so there is no Sheets API quota concern for polling.
+
+## 21. Google Sheets Operational Limits Reference
+
+These are the confirmed operational limits relevant to this workflow:
+
+| Limit | Value | Source |
+| --- | --- | --- |
+| Sheets API read requests | 300 per minute per project (default) | Google Cloud quotas |
+| Sheets API write requests | 300 per minute per project (default) | Google Cloud quotas |
+| Cells per spreadsheet | 10,000,000 | Google Sheets limits |
+| Columns per sheet | 18,278 | Google Sheets limits |
+| Characters per cell | 50,000 | Google Sheets limits |
+| Apps Script daily triggers | 20 per user per script (time-driven); event-driven are not limited by this | Apps Script quotas |
+| Apps Script execution time | 6 minutes per execution | Apps Script quotas |
+| `UrlFetchApp` daily quota | 20,000 calls per day (consumer); 100,000 (Workspace) | Apps Script quotas |
+| `UrlFetchApp` per execution | No hard limit, but constrained by 6-minute execution time | Apps Script quotas |
+
+At 500 withdrawal decisions per day, the `UrlFetchApp` quota is not a concern. At 10K+ decisions per day, Google Workspace edition matters.
+
+## 22. Summary of Changes Made to Demo Codebase
+
+The following optimizations were applied to the demo codebase to support 10,000+ active players:
+
+### `config.py`
+- Added `SHEETS_API_CONCURRENT_LIMIT` (default 5): controls max concurrent Sheets API calls
+- Added `SHEETS_CLIENT_TTL_SECONDS` (default 300): thread-local Sheets client cache lifetime
+- Added `RECONCILIATION_COOLDOWN_SECONDS` (default 15): per-session cooldown on Sheets reads during polling
+
+### `sheets_service.py`
+- **Thread-local cached Sheets client**: Avoids re-reading the service account JSON and re-building the API discovery client on every request. Clients are cached per-thread with a configurable TTL, maintaining thread safety (httplib2 is not thread-safe across threads)
+- **Semaphore-based concurrency limiter**: All Sheets API calls now acquire a semaphore before executing, preventing burst traffic from exceeding Google Sheets API quotas
+- **GMT+2 sheet timestamps**: Column B timestamps are written by the backend in GMT+2 so reviewer-facing sheet data matches the operational timezone expectation
+
+### `session_store.py`
+- **SQLite performance pragmas**: Added `busy_timeout=5000` (5s write lock wait), `cache_size=-32000` (~32 MB page cache), `mmap_size=268435456` (256 MB memory-mapped I/O)
+- **Cleanup index**: Added index on `sessions(updated_at)` for efficient expiration queries at high row counts
+
+### `main.py`
+- **Reconciliation throttle**: Per-session cooldown prevents excessive Sheets API reads during high-frequency polling. Without this, 10K pending sessions polled every 10–15 seconds would generate ~700 Sheets reads/second against a 5/second quota
+- **Reconciliation cache cleanup**: Background cleanup worker prunes stale entries from the throttle cache to prevent unbounded memory growth
+- **Timing-safe webhook secret comparison**: Uses `hmac.compare_digest()` instead of `!=` to prevent timing-based side-channel attacks on the shared webhook secret
+
 This is the strongest architecture to present now because it respects the company decision to keep Google Sheets, removes the highest-friction manual customer-support steps, and gives a credible enterprise migration path using standard Google Cloud services.
 
-## 15. Implementation Checklist for Later
+## 23. Implementation Checklist for Later
 
 When the company approves the migration after the demo, the implementation work should start with this checklist:
 
