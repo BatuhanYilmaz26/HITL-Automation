@@ -2,9 +2,9 @@
 main.py - FastAPI server with durable HITL queue workers and webhook endpoints.
 
 Run with:
-    python main.py
+    python -m src.main
 or:
-    uvicorn main:app --host 0.0.0.0 --port 8000
+    uvicorn src.main:app --host 0.0.0.0 --port 8000
 """
 
 from __future__ import annotations
@@ -23,9 +23,7 @@ from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-import config
-import session_store
-import sheets_service
+from src import config, session_store, sheets_service
 
 logger = logging.getLogger(__name__)
 
@@ -509,4 +507,4 @@ async def ada_check_status_legacy(player_id: str, row_number: int):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host=config.HOST, port=config.PORT, reload=False, log_level="info")
+    uvicorn.run("src.main:app", host=config.HOST, port=config.PORT, reload=False, log_level="info")

@@ -16,7 +16,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # ── Load .env from project root ─────────────────────────────────────
-_env_path = Path(__file__).resolve().parent / ".env"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_env_path = PROJECT_ROOT / ".env"
 load_dotenv(_env_path)
 
 
@@ -46,13 +47,22 @@ def _get_origins() -> list[str]:
     return origins or ["*"]
 
 
+def _resolve_project_path(raw_path: str) -> str:
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        return str(candidate)
+    return str(PROJECT_ROOT / candidate)
+
+
 # ── Google Sheets ────────────────────────────────────────────────────
 SPREADSHEET_ID: str = os.getenv("SPREADSHEET_ID", "")
 SHEET_NAME: str = os.getenv("SHEET_NAME", "Sheet1")
 SHEETS_API_KEY: str = os.getenv("SHEETS_API_KEY", "")
 
 # ── Service Account ─────────────────────────────────────────────────
-SERVICE_ACCOUNT_PATH: str = os.getenv("SERVICE_ACCOUNT_PATH", "service_account.json")
+SERVICE_ACCOUNT_PATH: str = _resolve_project_path(
+    os.getenv("SERVICE_ACCOUNT_PATH", "service_account.json")
+)
 
 # ── Webhook ──────────────────────────────────────────────────────────
 WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
@@ -64,7 +74,7 @@ CORS_ALLOW_ORIGINS: list[str] = _get_origins()
 ALLOW_CREDENTIALS: bool = _get_bool("ALLOW_CREDENTIALS", False)
 
 # ── Persistence & Queueing ──────────────────────────────────────────
-SESSION_DB_PATH: str = os.getenv("SESSION_DB_PATH", "hitl_sessions.db")
+SESSION_DB_PATH: str = _resolve_project_path(os.getenv("SESSION_DB_PATH", "hitl_sessions.db"))
 SESSION_RETENTION_HOURS: int = _get_int("SESSION_RETENTION_HOURS", 168)
 SESSION_CLEANUP_INTERVAL_SECONDS: int = _get_int("SESSION_CLEANUP_INTERVAL_SECONDS", 1800)
 SESSION_LIST_MAX_LIMIT: int = _get_int("SESSION_LIST_MAX_LIMIT", 500)

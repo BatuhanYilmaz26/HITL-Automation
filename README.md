@@ -66,18 +66,18 @@ This system is designed so that **zero withdrawal requests are missed or skipped
 
 | Feature                           | File                      | Description                                                                                                                     |
 | --------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| **Sheets Retry**            | `sheets_service.py`     | Truncated exponential backoff with jitter covers quota spikes, 5xx responses, and transient transport errors such as Windows socket aborts.                    |
-| **Thread-Local Sheets Client Cache** | `sheets_service.py` | Reuses a cached Sheets client per thread with a TTL, avoiding cross-thread reuse of `httplib2.Http()` without rebuilding the client on every call. |
-| **Sheets Concurrency Limit** | `sheets_service.py` | Limits concurrent Sheets API calls with a semaphore so worker bursts and reconciliation reads do not overwhelm API quota. |
-| **Atomic Sheets Append**    | `sheets_service.py`     | Uses a single `values.append` call instead of scanning `A5:K` to find the next row.                                           |
-| **Durable Session Store**   | `session_store.py`      | Persists session status in SQLite so polling, webhook updates, and restarts stay in sync.                                      |
-| **Durable Review Queue**    | `main.py`               | Review jobs are queued in SQLite and claimed by worker tasks, so requests are recoverable after restarts.                      |
-| **Reconciliation Cooldown** | `main.py` | Pending sessions reconcile from Google Sheets only after a per-session cooldown, preventing polling traffic from exhausting read quota. |
-| **SQLite Tuning** | `session_store.py` | WAL mode plus `busy_timeout`, cache sizing, memory-mapped I/O, and cleanup indexing improve durability and performance under concurrency. |
-| **Backend Timestamping**    | `sheets_service.py`     | The API writes Column B directly in GMT+2, removing the expensive Apps Script full-sheet `onChange` scan.                               |
-| **Webhook Retry**           | `apps_script.js`        | Apps Script retries up to 3x with exponential backoff if the webhook fails.                                                    |
-| **Timing-Safe Webhook Auth** | `main.py` | The webhook secret is validated with `hmac.compare_digest()` instead of a simple string comparison. |
-| **Operational Metrics**     | `main.py`               | `/metrics` exposes queue depth, worker counts, session status counts, and review job outcomes.                                |
+| **Sheets Retry**            | `src/sheets_service.py`     | Truncated exponential backoff with jitter covers quota spikes, 5xx responses, and transient transport errors such as Windows socket aborts.                    |
+| **Thread-Local Sheets Client Cache** | `src/sheets_service.py` | Reuses a cached Sheets client per thread with a TTL, avoiding cross-thread reuse of `httplib2.Http()` without rebuilding the client on every call. |
+| **Sheets Concurrency Limit** | `src/sheets_service.py` | Limits concurrent Sheets API calls with a semaphore so worker bursts and reconciliation reads do not overwhelm API quota. |
+| **Atomic Sheets Append**    | `src/sheets_service.py`     | Uses a single `values.append` call instead of scanning `A5:K` to find the next row.                                           |
+| **Durable Session Store**   | `src/session_store.py`      | Persists session status in SQLite so polling, webhook updates, and restarts stay in sync.                                      |
+| **Durable Review Queue**    | `src/main.py`               | Review jobs are queued in SQLite and claimed by worker tasks, so requests are recoverable after restarts.                      |
+| **Reconciliation Cooldown** | `src/main.py` | Pending sessions reconcile from Google Sheets only after a per-session cooldown, preventing polling traffic from exhausting read quota. |
+| **SQLite Tuning** | `src/session_store.py` | WAL mode plus `busy_timeout`, cache sizing, memory-mapped I/O, and cleanup indexing improve durability and performance under concurrency. |
+| **Backend Timestamping**    | `src/sheets_service.py`     | The API writes Column B directly in GMT+2, removing the expensive Apps Script full-sheet `onChange` scan.                               |
+| **Webhook Retry**           | `src/apps_script.js`        | Apps Script retries up to 3x with exponential backoff if the webhook fails.                                                    |
+| **Timing-Safe Webhook Auth** | `src/main.py` | The webhook secret is validated with `hmac.compare_digest()` instead of a simple string comparison. |
+| **Operational Metrics**     | `src/main.py`               | `/metrics` exposes queue depth, worker counts, session status counts, and review job outcomes.                                |
 
 ---
 
@@ -97,7 +97,7 @@ This system is designed so that **zero withdrawal requests are missed or skipped
 1. Clone & Setup Venv. Install requirements.
 2. Copy `.env.example` to `.env` and fill in the current runtime values.
 3. Share the Google Sheet with the service account email as an Editor.
-4. Run `python main.py`
+4. Run `python -m src.main`
 5. Expose localhost with ngrok: `ngrok http 8000`
 6. Open `http://localhost:8000/docs` or `http://localhost:8000/redoc` to inspect the live FastAPI surface.
 
@@ -142,7 +142,7 @@ The values in `.env.example` are demo-oriented starter defaults. If you want cle
 - Point `SESSION_DB_PATH` to a durable disk location for any environment that should survive restarts.
 - Set `CORS_ALLOW_ORIGINS` to the exact ADA domains you expect; only enable `ALLOW_CREDENTIALS=true` with explicit origins.
 - Tune `REVIEW_WORKER_COUNT`, `SHEETS_API_CONCURRENT_LIMIT`, and `RECONCILIATION_COOLDOWN_SECONDS` to match expected traffic and Google Sheets quota.
-- Update `apps_script.js` with the active `/webhook` URL and the same `WEBHOOK_SECRET` value.
+- Update `src/apps_script.js` with the active `/webhook` URL and the same `WEBHOOK_SECRET` value.
 - Install the Apps Script `onEdit` trigger and confirm the `ErrorLog` sheet is empty after a test run.
 - Verify `/health`, `/metrics`, one end-to-end append, and one end-to-end human decision before presenting the demo.
 
@@ -185,4 +185,4 @@ Invoke-RestMethod -Uri "http://localhost:8000/hitl/v1/status/session/YOUR_SESSIO
 ```
 
 ## Tools Available
-Run `python test_concurrent.py` to exercise the durable queue path with burst or staggered request loads.
+Run `python -m src.test_concurrent` to exercise the durable queue path with burst or staggered request loads.

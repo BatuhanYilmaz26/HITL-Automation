@@ -14,7 +14,7 @@ Before configuring ADA, ensure your Google Sheet can talk back to your local ser
 
 1. Open your Google Sheet.
 2. Go to **Extensions** → **Apps Script**.
-3. In `apps_script.js`, locate the `WEBHOOK_URL` constant:
+3. In `src/apps_script.js`, locate the `WEBHOOK_URL` constant:
    ```javascript
    const WEBHOOK_URL = "https://<your-ngrok-url>.ngrok-free.app/webhook";
    ```
@@ -161,7 +161,7 @@ Below is the complete breakdown of all API statuses returned by the system:
 
 Use this checklist before your first end-to-end demonstration:
 
-- [ ] Server starts without errors: `python main.py`
+- [ ] Server starts without errors: `python -m src.main`
 - [ ] Health check returns OK: `GET /health`
 - [ ] ngrok tunnel is active and URL updated in Apps Script
 - [ ] Google Sheet is shared with the service account email (Editor role)
@@ -172,7 +172,7 @@ Use this checklist before your first end-to-end demonstration:
 - [ ] Timestamp is written automatically in Column B by the backend append in GMT+2
 - [ ] Typing Decision + Notes fires webhook (check server logs for `Webhook received`)
 - [ ] Poll status returns `"status": "approved"` with full `row_data`
-- [ ] Concurrency test passes: `python test_concurrent.py --count 10`
+- [ ] Concurrency test passes: `python -m src.test_concurrent --count 10`
 
 ---
 
@@ -180,7 +180,7 @@ Use this checklist before your first end-to-end demonstration:
 
 To ensure everything is working correctly:
 
-1. Run `python main.py` on your local machine.
+1. Run `python -m src.main` on your local machine.
 2. Trigger the flow via the ADA chatbot.
 3. Observe the server logs—you should see:
   - `ADA Request via Chatbot: player=...`

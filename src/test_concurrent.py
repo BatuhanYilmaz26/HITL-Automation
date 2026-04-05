@@ -9,10 +9,10 @@ Supports two modes:
   - staggered: fires in batches with a pause between batches
 
 Usage:
-    python test_concurrent.py                                  # 15 requests, staggered
-    python test_concurrent.py --count 20                       # 20 requests, staggered
-    python test_concurrent.py --mode burst                     # all at once
-    python test_concurrent.py --batch-size 4 --batch-delay 15  # 4 per batch, 15s gap
+    python -m src.test_concurrent                                  # 15 requests, staggered
+    python -m src.test_concurrent --count 20                       # 20 requests, staggered
+    python -m src.test_concurrent --mode burst                     # all at once
+    python -m src.test_concurrent --batch-size 4 --batch-delay 15  # 4 per batch, 15s gap
 """
 
 from __future__ import annotations
@@ -184,7 +184,7 @@ async def run_test(
     # Pre-flight: ensure server is alive
     print("Pre-flight check ...")
     if not await preflight_check(base_url):
-        print("\nAborting - server is not reachable. Start it with: python main.py")
+        print("\nAborting - server is not reachable. Start it with: python -m src.main")
         sys.exit(1)
     print()
 

@@ -10,11 +10,11 @@ This document is a comprehensive guide to understanding the **Human-in-the-Loop 
 The purpose of this system is to handle automated withdrawal requests from players (originating from a chatbot like Ada.cx) but with a mandatory **Human-in-the-Loop** step. The system operates as a low-latency router with durable state.
 
 ### Core Flow
-1. **Trigger:** A chatbot (e.g., Ada) sends a withdrawal request to our Python server (`main.py`).
+1. **Trigger:** A chatbot (e.g., Ada) sends a withdrawal request to our Python server (`src/main.py`).
 2. **Fast Response:** The FastAPI server instantly generates a `session_id`, stores both the session and a queued review job in SQLite, and returns `{"status": "processing", "session_id": "xyz"}` to the chatbot.
-3. **Escalation (Workers):** Dedicated review workers claim queued jobs, append a new row into Google Sheets (`sheets_service.py`), then update the persisted session status to `pending_human_review`.
+3. **Escalation (Workers):** Dedicated review workers claim queued jobs, append a new row into Google Sheets (`src/sheets_service.py`), then update the persisted session status to `pending_human_review`.
 4. **Human Action:** A human reviewer opens the Google Sheet, looks at the withdrawal request, and types "Yes" or "No" in the Decision column.
-5. **Webhook to Backend:** A Google Apps Script (`apps_script.js`) attached to the Spreadsheet detects this edit and immediately fires an HTTP payload (webhook) back to our Python server.
+5. **Webhook to Backend:** A Google Apps Script (`src/apps_script.js`) attached to the Spreadsheet detects this edit and immediately fires an HTTP payload (webhook) back to our Python server.
 6. **State Sync:** The Python server receives the webhook and updates the persistent session record to `approved` or `rejected` with the human notes. 
 7. **Final State:** The chatbot cleanly polls our server via `/hitl/v1/status/session/{session_id}` and retrieves the final status to deliver to the user.
 
@@ -29,7 +29,7 @@ The purpose of this system is to handle automated withdrawal requests from playe
 *   `pydantic`: Schema validation.
 *   `aiohttp`: Async HTTP client used by the concurrency stress test.
 
-### Secure Sheets Client (`sheets_service.py`)
+### Secure Sheets Client (`src/sheets_service.py`)
 Because the system is asynchronous and multi-threaded by nature, the Google Sheets client must avoid shared `httplib2` state while also avoiding unnecessary rebuilds.
 
 *   **Thread-local client cache**: Each worker thread keeps its own cached Sheets client for `SHEETS_CLIENT_TTL_SECONDS`, so `httplib2.Http()` is never shared across threads.
@@ -41,20 +41,20 @@ Because the system is asynchronous and multi-threaded by nature, the Google Shee
 
 ---
 
-## 3. The FastAPI Core (`main.py`)
+## 3. The FastAPI Core (`src/main.py`)
 
-`main.py` is the front door. 
+`src/main.py` is the front door. 
 
-*   **`session_store.py`**: A persistent SQLite-backed state machine for both sessions and queued review jobs.
+*   **`src/session_store.py`**: A persistent SQLite-backed state machine for both sessions and queued review jobs.
 *   **`/hitl/v1/request_review`**: Persists a new session and review job, then returns `session_id` instantly.
 *   **Review workers**: Background worker coroutines claim queued jobs and process Sheets writes without blocking request handlers.
 *   **`/hitl/v1/status/session/{session_id}`**: Polling endpoint. It returns the persisted session record and can reconcile pending rows from Google Sheets on a per-session cooldown.
 *   **`/webhook`**: Handles incoming HTTP POST requests from Google Apps Script and updates persistent state using timing-safe secret comparison.
 *   **Interactive docs**: The FastAPI app exposes Swagger UI at `/docs` and ReDoc at `/redoc`.
-*   **CORS behavior**: Allowed origins and credential behavior come from `config.py` and are applied through FastAPI's `CORSMiddleware`.
+*   **CORS behavior**: Allowed origins and credential behavior come from `src/config.py` and are applied through FastAPI's `CORSMiddleware`.
 *   **Player ID compatibility**: The chatbot request model accepts either `playerUid` or `player_id` and normalizes them into the stored player identifier.
 
-### Durable SQLite Store (`session_store.py`)
+### Durable SQLite Store (`src/session_store.py`)
 
 The demo uses SQLite as both a session store and a durable review-job queue.
 
@@ -63,7 +63,7 @@ The demo uses SQLite as both a session store and a durable review-job queue.
 *   **Indexed cleanup path**: Session cleanup runs against an index on `updated_at` instead of forcing a full table scan as row counts grow.
 *   **Companion WAL files**: While the app is running, SQLite may create `hitl_sessions.db-wal` and `hitl_sessions.db-shm`; those files are expected parts of the same database.
 
-### Configuration (`config.py`)
+### Configuration (`src/config.py`)
 
 The application exposes its operational tuning through environment variables.
 
@@ -91,7 +91,7 @@ The current HTTP surface is broader than the main ADA flow:
 
 ---
 
-## 4. Apps Script (`apps_script.js`)
+## 4. Apps Script (`src/apps_script.js`)
 
 Our final puzzle piece lives inside Google Sheets. Without this, the Python server would never know a human wrote "Yes" or "No".
 
@@ -102,7 +102,7 @@ The Apps Script also writes failed webhook attempts to an `ErrorLog` sheet so op
 
 ---
 
-## 5. Stress Testing (`test_concurrent.py`)
+## 5. Stress Testing (`src/test_concurrent.py`)
 
 Due to the concurrency constraints of Google API limits, this file tortures the system safely.
 * It blasts `/hitl/v1/request_review` heavily.

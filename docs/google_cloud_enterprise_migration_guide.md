@@ -721,15 +721,15 @@ The following table summarizes every optimization applied to the demo codebase a
 
 | Demo optimization | File | Enterprise equivalent |
 | --- | --- | --- |
-| Thread-local cached Sheets client with TTL | `sheets_service.py` | ADC-authenticated Cloud Run service account; no JSON key or local caching needed |
-| Semaphore-based Sheets API concurrency limit | `sheets_service.py` | Cloud Tasks queue rate limiting and max concurrent dispatches |
-| Per-session reconciliation cooldown | `main.py` | Cloud SQL is source of truth; no Sheets reconciliation needed |
-| Reconciliation cache cleanup in background worker | `main.py` | Cloud Scheduler + Cloud Run Jobs for periodic housekeeping |
-| Timing-safe webhook secret comparison | `main.py` | Cloud Armor + IAM-authenticated invocations replace shared secrets |
-| SQLite WAL mode + tuned pragmas | `session_store.py` | Cloud SQL for PostgreSQL with managed HA and connection pooling |
-| Updated index on `sessions(updated_at)` | `session_store.py` | PostgreSQL indexes on equivalent tables |
-| Configurable tuning parameters | `config.py` | Secret Manager for secrets; environment variables in Cloud Run for non-secret config |
-| Durable review job queue in SQLite | `session_store.py` | Cloud Tasks with at-least-once delivery and deduplication |
+| Thread-local cached Sheets client with TTL | `src/sheets_service.py` | ADC-authenticated Cloud Run service account; no JSON key or local caching needed |
+| Semaphore-based Sheets API concurrency limit | `src/sheets_service.py` | Cloud Tasks queue rate limiting and max concurrent dispatches |
+| Per-session reconciliation cooldown | `src/main.py` | Cloud SQL is source of truth; no Sheets reconciliation needed |
+| Reconciliation cache cleanup in background worker | `src/main.py` | Cloud Scheduler + Cloud Run Jobs for periodic housekeeping |
+| Timing-safe webhook secret comparison | `src/main.py` | Cloud Armor + IAM-authenticated invocations replace shared secrets |
+| SQLite WAL mode + tuned pragmas | `src/session_store.py` | Cloud SQL for PostgreSQL with managed HA and connection pooling |
+| Updated index on `sessions(updated_at)` | `src/session_store.py` | PostgreSQL indexes on equivalent tables |
+| Configurable tuning parameters | `src/config.py` | Secret Manager for secrets; environment variables in Cloud Run for non-secret config |
+| Durable review job queue in SQLite | `src/session_store.py` | Cloud Tasks with at-least-once delivery and deduplication |
 
 ## 17. Testing and Validation Strategy
 
@@ -737,8 +737,8 @@ The following table summarizes every optimization applied to the demo codebase a
 
 Before the shareholder demo:
 
-1. Start server with `python main.py` and confirm healthy startup logs
-2. Run `python test_concurrent.py --count 50 --mode staggered --batch-size 10` to stress test
+1. Start server with `python -m src.main` and confirm healthy startup logs
+2. Run `python -m src.test_concurrent --count 50 --mode staggered --batch-size 10` to stress test
 3. Verify all 50 rows appear in Google Sheets with correct timestamps, player IDs, and session IDs
 4. Enter Decision + Notes on 5–10 rows and verify webhook delivery in server logs
 5. Poll status endpoints and confirm `approved`/`rejected` results
@@ -792,13 +792,13 @@ Use the following load test patterns before production:
 | Test | Tool | Target |
 | --- | --- | --- |
 | API response time under load | `locust` or `k6` | Cloud Run `/hitl/v1/request_review` and `/hitl/v1/status/session/*` |
-| Queue throughput | `test_concurrent.py` enhanced | Cloud Tasks → Sheets append at rate limit |
+| Queue throughput | `src/test_concurrent.py` enhanced | Cloud Tasks → Sheets append at rate limit |
 | Polling scalability | `k6` with sustained connections | 10K concurrent GET requests to status endpoint |
 | Webhook delivery under failure | Manual or chaos testing | Kill Cloud Run mid-webhook; verify retry and recovery |
 | Database connection saturation | `pgbench` or application load | Cloud SQL at max Cloud Run instances |
 
 Important interpretation note:
-- The current repository's `test_concurrent.py` validates the local FastAPI + SQLite + Google Sheets path.
+- The current repository's `src/test_concurrent.py` validates the local FastAPI + SQLite + Google Sheets path.
 - It is useful for demo readiness, but it is not a substitute for a true Cloud Run, Cloud Tasks, and Cloud SQL load test after migration.
 
 ## 18. Cost Estimation
@@ -918,21 +918,21 @@ Quotas and limits change over time. Re-check the live Google documentation befor
 
 The following optimizations were applied to the demo codebase to support 10,000+ active players:
 
-### `config.py`
+### `src/config.py`
 - Added `SHEETS_API_CONCURRENT_LIMIT` (default 5): controls max concurrent Sheets API calls
 - Added `SHEETS_CLIENT_TTL_SECONDS` (default 300): thread-local Sheets client cache lifetime
 - Added `RECONCILIATION_COOLDOWN_SECONDS` (default 15): per-session cooldown on Sheets reads during polling
 
-### `sheets_service.py`
+### `src/sheets_service.py`
 - **Thread-local cached Sheets client**: Avoids re-reading the service account JSON and re-building the API discovery client on every request. Clients are cached per-thread with a configurable TTL, maintaining thread safety (httplib2 is not thread-safe across threads)
 - **Semaphore-based concurrency limiter**: All Sheets API calls now acquire a semaphore before executing, preventing burst traffic from exceeding Google Sheets API quotas
 - **GMT+2 sheet timestamps**: Column B timestamps are written by the backend in GMT+2 so reviewer-facing sheet data matches the operational timezone expectation
 
-### `session_store.py`
+### `src/session_store.py`
 - **SQLite performance pragmas**: Added `busy_timeout=5000` (5s write lock wait), `cache_size=-32000` (~32 MB page cache), `mmap_size=268435456` (256 MB memory-mapped I/O)
 - **Cleanup index**: Added index on `sessions(updated_at)` for efficient expiration queries at high row counts
 
-### `main.py`
+### `src/main.py`
 - **Reconciliation throttle**: Per-session cooldown prevents excessive Sheets API reads during high-frequency polling. Without this, 10K pending sessions polled every 10–15 seconds would generate ~700 Sheets reads/second against a 5/second quota
 - **Reconciliation cache cleanup**: Background cleanup worker prunes stale entries from the throttle cache to prevent unbounded memory growth
 - **Timing-safe webhook secret comparison**: Uses `hmac.compare_digest()` instead of `!=` to prevent timing-based side-channel attacks on the shared webhook secret
